@@ -1,0 +1,20 @@
+# Build context excludes. The build context is the MONOREPO ROOT for every
+# service (workspace packages are consumed as raw TypeScript), so this file has
+# to cover every app and package at once.
+
+# Dependencies — always reinstalled inside the image. Copying host node_modules
+# in would be actively wrong: this repo is developed on Windows and Prisma's
+# query engine and bcrypt are native, platform-specific builds.
+node_modules
+
+# Build outputs — regenerated in the build stage.
+.next
+dist
+.turbo
+
+# Version control
+.git
+
+# Playwright artifacts
+apps/e2e/test-results
+apps/e2e/playwright-report

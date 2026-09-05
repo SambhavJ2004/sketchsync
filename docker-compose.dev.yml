@@ -1,0 +1,51 @@
+# Local Postgres for development.
+#
+# This is the file you use day to day, alongside `pnpm dev` running on the host:
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   pnpm dev
+#
+# It deliberately contains ONLY the database. The three services keep running on
+# the host so hot reload, breakpoints and `tsx watch` behave exactly as before —
+# the only thing that moves into a container is Postgres.
+#
+# Until now there was no local database at all: dev AND the Playwright suite both
+# ran against hosted Neon. Every test run mutated a shared remote database and
+# paid a ~850ms cold-start wake.
+#
+# Credentials here are `sketchsync` throughout ON PURPOSE. This container is
+# reachable only from localhost, holds nothing but disposable dev data, and the
+# whole point is that a fresh clone can start it with no secret handling. Never
+# reuse this shape for anything reachable from a network.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: sketchsync-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sketchsync
+      POSTGRES_PASSWORD: sketchsync
+      POSTGRES_DB: sketchsync
+    ports:
+      # Published so host-side `pnpm dev`, the Prisma CLI and psql can all reach
+      # it at localhost:5432. If something else already owns 5432 on this
+      # machine, change the LEFT side only and update DATABASE_URL to match.
+      - "5432:5432"
+    volumes:
+      # Named volume, so data survives `down` and is only destroyed by an
+      # explicit `down -v`.
+      - sketchsync-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` alone reports true briefly during the entrypoint's initdb
+      # bootstrap, while the server is still listening only on a unix socket.
+      # Naming the user and database makes it a real "ready for our queries"
+      # probe — which is what a Phase 1 migrate step and later CI need.
+      test: ["CMD-SHELL", "pg_isready -U sketchsync -d sketchsync"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  sketchsync-pgdata:
