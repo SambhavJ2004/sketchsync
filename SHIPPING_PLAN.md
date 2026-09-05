@@ -29,11 +29,13 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
   **api 752 MB, realtime 742 MB, web 448 MB**. The full e2e suite has been run against the
   local containerized Postgres: **27 passed in 5.3 minutes, no flake.**
 
-- **Phase 2 — in progress.** `.github/workflows/ci.yml` with a `gate` job and a `docker`
-  job. `docker` was green on the first run. `gate` failed on turbo strict env mode — Turbo 2
-  strips variables a task does not declare, which is invisible locally because the apps read
-  `.env` off disk — fixed by declaring env vars **per task** in `turbo.json` rather than in
-  `globalEnv`, so cache keys stay granular. **E2E on a Linux runner is not yet verified.**
+- **Phase 2 — done.** `.github/workflows/ci.yml` with a `gate` job and a `docker` job.
+  `docker` was green on the first run. `gate` failed on run #1 with turbo strict env mode —
+  Turbo 2 strips variables a task does not declare, which is invisible locally because the
+  apps read `.env` off disk — fixed by declaring env vars **per task** in `turbo.json`
+  rather than in `globalEnv`, so cache keys stay granular. **Run #2 passed the full gate in
+  6m26s, including `test:e2e` on a Linux runner** — the suite is now verified in CI, not
+  only locally. The `ci` branch is merged into `main`.
 
 - **Phases 3, 4 and 5 — not started.** Private boards and invites; deploy; README, demo and
   resume, respectively.
