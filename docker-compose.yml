@@ -1,0 +1,163 @@
+# Full stack: postgres -> migrate -> api + realtime -> web.
+#
+#   docker compose up --build      # then open http://localhost:3000
+#
+# Goal is a working app from a fresh clone with NO .env files present, so every
+# value below has a default. Override any of them in the environment.
+#
+# This shares its project name, container name and volume with
+# docker-compose.dev.yml, so the two are two views of ONE local database rather
+# than two competing ones. `docker compose down -v` therefore destroys the data
+# behind BOTH files.
+#
+# Production does NOT use this file. api and realtime deploy to Render from
+# their Dockerfiles; web deploys to Vercel, which builds from source and ignores
+# apps/web/Dockerfile entirely.
+
+# ── The environment wiring is the part that actually breaks ─────────────────
+#
+# Three values look similar and follow three different rules:
+#
+#   API_ORIGIN=http://api:3001
+#     Consumed by the NEXT SERVER, which runs inside this network, so it is a
+#     SERVICE NAME. BUILD-TIME, despite reading like runtime config: Next
+#     evaluates rewrites() during `next build` and freezes the result into
+#     routes-manifest.json. Verified by running the image with a bogus runtime
+#     value — it still proxied to http://api:3001. Changing it is a REBUILD.
+#
+#   NEXT_PUBLIC_REALTIME_URL=ws://localhost:3002
+#     Inlined into the BROWSER bundle at build time, so it must be an address
+#     the browser can reach — a published host port. A service name here
+#     (ws://realtime:3002) builds fine and then breaks every socket, because
+#     that DNS name exists only inside this network.
+#
+#   WEB_ORIGIN=http://localhost:3000
+#     The origin the BROWSER sends, never a service name. On realtime this is
+#     the exact-match allowlist checked at WebSocket upgrade — a real security
+#     control. Wrong value => every socket 403s.
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: sketchsync-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sketchsync
+      POSTGRES_PASSWORD: sketchsync
+      POSTGRES_DB: sketchsync
+    ports:
+      - "5432:5432"
+    volumes:
+      - sketchsync-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Names the user AND database: bare `pg_isready` briefly reports true
+      # during initdb, while the server still only listens on a unix socket.
+      test: ["CMD-SHELL", "pg_isready -U sketchsync -d sketchsync"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # One-shot schema migration. Runs to completion, then exits 0; api and
+  # realtime wait on that exit rather than on a timer.
+  #
+  # Reuses the `build` STAGE of the api image rather than adding a Dockerfile:
+  # that stage is the full (non---prod) install, so it is the only place that
+  # has both the prisma CLI and the schema. The runtime stage deliberately does
+  # not — the CLI is a devDependency.
+  #
+  # `migrate deploy`, NEVER `db push`: db push does not create the
+  # sketchsync_insert_element plpgsql function from migration 20260806130000,
+  # and without it concurrent element creates race on zIndex.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: build
+    container_name: sketchsync-migrate
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://sketchsync:sketchsync@postgres:5432/sketchsync
+    command: pnpm --filter @sketchsync/db exec prisma migrate deploy
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: sketchsync-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      API_PORT: 3001
+      REALTIME_PORT: 3002
+      DATABASE_URL: postgresql://sketchsync:sketchsync@postgres:5432/sketchsync
+      # Must be byte-identical to realtime's: realtime verifies the cookie this
+      # service signs. Overridable, with a dev default so a clean clone runs.
+      JWT_SECRET: ${JWT_SECRET:-sketchsync-local-compose-secret-change-me}
+      # The BROWSER's origin, not a service name.
+      WEB_ORIGIN: http://localhost:3000
+    ports:
+      # Published for debugging and for pointing the e2e suite here. The browser
+      # never uses it — it reaches this service through web's /api/* proxy.
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  realtime:
+    build:
+      context: .
+      dockerfile: apps/realtime/Dockerfile
+    container_name: sketchsync-realtime
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      API_PORT: 3001
+      REALTIME_PORT: 3002
+      DATABASE_URL: postgresql://sketchsync:sketchsync@postgres:5432/sketchsync
+      JWT_SECRET: ${JWT_SECRET:-sketchsync-local-compose-secret-change-me}
+      # UPGRADE ALLOWLIST. Exact string match against the Origin header the
+      # browser sends. This is the only thing preventing a cross-site socket
+      # hijack now that the credential is a client-supplied ticket.
+      WEB_ORIGIN: http://localhost:3000
+    ports:
+      # MUST be published: the browser connects here directly. The socket is
+      # not proxied through web — a rewrite cannot proxy a WebSocket.
+      - "3002:3002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # Both are BUILD-TIME. See the header block above for why each takes
+        # the value it does.
+        NEXT_PUBLIC_REALTIME_URL: ws://localhost:3002
+        API_ORIGIN: http://api:3001
+    container_name: sketchsync-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # Carried at runtime too, but the build arg above is what actually routes
+      # /api/* traffic. Kept so the two cannot silently disagree.
+      API_ORIGIN: http://api:3001
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+      realtime:
+        condition: service_healthy
+
+volumes:
+  sketchsync-pgdata:

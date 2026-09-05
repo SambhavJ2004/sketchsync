@@ -1,19 +1,33 @@
 # Build context excludes. The build context is the MONOREPO ROOT for every
 # service (workspace packages are consumed as raw TypeScript), so this file has
 # to cover every app and package at once.
+#
+# NOTE THE `**/` PREFIXES — they are not decoration. Docker matches these
+# patterns against the full path relative to the context root, so a bare
+# `node_modules` excludes ONLY the top-level directory and happily copies
+# `apps/api/node_modules`, `packages/db/node_modules` and the rest. That is not
+# a size problem, it is a correctness one: this repo is developed on Windows,
+# pnpm writes ABSOLUTE symlinks into `.pnpm`, and a `COPY . .` would drop those
+# dead links on top of the install the image just did — the exact "never copy
+# host node_modules" trap. It fails as MODULE_NOT_FOUND during `prisma generate`.
 
-# Dependencies — always reinstalled inside the image. Copying host node_modules
-# in would be actively wrong: this repo is developed on Windows and Prisma's
-# query engine and bcrypt are native, platform-specific builds.
-node_modules
+# Dependencies — always reinstalled inside the image.
+**/node_modules
 
 # Build outputs — regenerated in the build stage.
-.next
-dist
-.turbo
+**/.next
+**/dist
+**/.turbo
+**/*.tsbuildinfo
 
 # Version control
 .git
+
+# Local secrets. The images take configuration from the environment; a stray
+# .env baked into a layer is both wrong and a leak.
+**/.env
+**/.env.*
+!**/.env.example
 
 # Playwright artifacts
 apps/e2e/test-results

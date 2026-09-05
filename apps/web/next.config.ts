@@ -14,6 +14,19 @@ const API_ORIGIN = process.env.API_ORIGIN ?? "http://localhost:3001";
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   /**
+   * Emit a self-contained server bundle for the Docker image: Next traces the
+   * files actually reachable and writes `.next/standalone`, so the image needs
+   * neither the pnpm store nor a `next` install at runtime.
+   *
+   * Harmless outside Docker — `pnpm dev` and `next start` ignore it — so it is
+   * unconditional rather than env-gated.
+   *
+   * Pairs with `outputFileTracingRoot` below: tracing must start at the
+   * monorepo root, because the reachable set includes workspace packages that
+   * live outside apps/web.
+   */
+  output: "standalone",
+  /**
    * The browser talks to `/api/*` on its OWN origin; Next proxies to the API.
    *
    * This exists because `SameSite=Lax` cookies are not sent — and, as measured,
