@@ -18,14 +18,24 @@ const nextConfig: NextConfig = {
    * files actually reachable and writes `.next/standalone`, so the image needs
    * neither the pnpm store nor a `next` install at runtime.
    *
-   * Harmless outside Docker — `pnpm dev` and `next start` ignore it — so it is
-   * unconditional rather than env-gated.
+   * OPT-IN VIA ENV, NOT UNCONDITIONAL. Tracing a pnpm workspace reproduces the
+   * store's symlinks, and creating a symlink on Windows requires Developer Mode
+   * or an elevated shell. Without it `next build` fails outright:
+   *
+   *   Error: EPERM: operation not permitted, symlink
+   *     '...node_modules/.pnpm/@next+env@15.5.20/...' ->
+   *     '...apps/web/.next/standalone/node_modules/...'
+   *
+   * So enabling it unconditionally breaks `pnpm build` — part of the baseline
+   * gate — for anyone developing on Windows, while passing on Linux CI and in
+   * the Docker build. apps/web/Dockerfile sets NEXT_OUTPUT=standalone; nothing
+   * else does.
    *
    * Pairs with `outputFileTracingRoot` below: tracing must start at the
    * monorepo root, because the reachable set includes workspace packages that
    * live outside apps/web.
    */
-  output: "standalone",
+  output: process.env.NEXT_OUTPUT === "standalone" ? "standalone" : undefined,
   /**
    * The browser talks to `/api/*` on its OWN origin; Next proxies to the API.
    *

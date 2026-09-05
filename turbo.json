@@ -2,25 +2,105 @@
   "$schema": "https://turbo.build/schema.json",
   "ui": "stream",
   "globalDependencies": [".env", "tsconfig.json"],
+
+  // ENV VARS ARE DECLARED PER TASK, NOT IN globalEnv.
+  //
+  // Turbo 2 defaults to STRICT env mode: a task's process receives only the
+  // variables that task declares, and everything else is stripped. That is why
+  // `turbo run test` passes locally and fails in CI — locally the apps call
+  // process.loadEnvFile() and read .env off disk, which turbo cannot strip, so
+  // the missing declarations are invisible until a runner has no .env files.
+  //
+  // Per task rather than global keeps cache keys granular: changing
+  // NEXT_PUBLIC_REALTIME_URL should invalidate `build`, not every test result.
   "tasks": {
+    // NEXT_PUBLIC_* are INLINED into the browser bundle here, so they belong to
+    // the build's own cache key — a changed value must produce a different
+    // artifact. API_ORIGIN is here because `next build` freezes rewrites() into
+    // routes-manifest.json.
     "build": {
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"],
+      "env": [
+        "NEXT_PUBLIC_REALTIME_URL",
+        "NEXT_PUBLIC_E2E",
+        "API_ORIGIN",
+        "NEXT_OUTPUT",
+        "NODE_ENV"
+      ]
     },
+
+    // Same set as `test`. Already uncached, so this changes no cache key — it
+    // exists so the dev servers actually RECEIVE these when they come from the
+    // environment rather than from a .env file.
     "dev": {
       "cache": false,
-      "persistent": true
+      "persistent": true,
+      "env": [
+        "DATABASE_URL",
+        "JWT_SECRET",
+        "API_PORT",
+        "REALTIME_PORT",
+        "WEB_ORIGIN",
+        "API_ORIGIN",
+        "NODE_ENV"
+      ]
     },
+
     "lint": {
       "dependsOn": ["^lint"]
     },
+
+    // packages/db's typecheck runs `prisma generate` first, and the datasource
+    // block reads env(DATABASE_URL).
     "typecheck": {
-      "dependsOn": ["^typecheck"]
+      "dependsOn": ["^typecheck"],
+      "env": ["DATABASE_URL"]
     },
+
+    // apps/realtime's suites import src/env.ts transitively
+    // (upgradeAuth.test.ts -> auth.ts -> env.ts), which calls loadEnv() at
+    // module load and throws when these are absent. Without these declarations
+    // CI fails with "Invalid environment variables: DATABASE_URL: Required ...".
     "test": {
       "dependsOn": ["^build"],
-      "outputs": []
+      "outputs": [],
+      "env": [
+        "DATABASE_URL",
+        "JWT_SECRET",
+        "API_PORT",
+        "REALTIME_PORT",
+        "WEB_ORIGIN",
+        "API_ORIGIN",
+        "NODE_ENV"
+      ]
     },
+
+    // NOT CURRENTLY REACHED BY TURBO. The root script is
+    // `pnpm --filter @sketchsync/e2e test:e2e`, which bypasses turbo entirely,
+    // so today these declarations are inert and the suite inherits the shell
+    // environment directly. Kept so that switching the root script to
+    // `turbo run test:e2e` does not silently strip the environment out from
+    // under Playwright and the three servers it spawns.
+    //
+    // Uncached because the suite talks to a live database and three live
+    // servers — a replayed "pass" would be a lie.
+    "test:e2e": {
+      "cache": false,
+      "env": [
+        "DATABASE_URL",
+        "JWT_SECRET",
+        "API_PORT",
+        "REALTIME_PORT",
+        "WEB_ORIGIN",
+        "API_ORIGIN",
+        "NEXT_PUBLIC_REALTIME_URL",
+        "NEXT_PUBLIC_E2E",
+        "E2E_WEB_ORIGIN",
+        "NODE_ENV"
+      ]
+    },
+
     "clean": {
       "cache": false
     }

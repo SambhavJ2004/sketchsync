@@ -68,6 +68,12 @@ ENV NEXT_PUBLIC_REALTIME_URL=$NEXT_PUBLIC_REALTIME_URL
 ARG API_ORIGIN=http://api:3001
 ENV API_ORIGIN=$API_ORIGIN
 
+# Turns on `output: "standalone"` in next.config.ts. Opt-in because the tracing
+# step recreates the pnpm store's symlinks, which Windows refuses without
+# Developer Mode — enabling it unconditionally breaks `pnpm build` on a Windows
+# dev machine. This build runs on Linux, where symlinks are unremarkable.
+ENV NEXT_OUTPUT=standalone
+
 RUN pnpm --filter @sketchsync/web build
 
 # ---------------------------------------------------------------------------
