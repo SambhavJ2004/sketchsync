@@ -8,13 +8,29 @@ ordering, presence/cursors, auth+rooms UI, gateway hardening, same-origin HTTP,
 cross-origin socket auth, e2e browser suite, PNG+SVG export, board rename, role-aware
 read-only UI, connection status + toasts, keyboard/empty-state pass). See "What's next".
 
+## Current state — read this first
+
+**Start every session by reading `SHIPPING_PLAN.md` § Progress.** It is the source of truth
+for where the project actually is, and it is updated at the end of each phase. The "Phase
+4.7" status line above and the "What's next" section at the bottom of this file describe the
+*application*, and predate the shipping work (git, Docker, CI, deploy) tracked there.
+
+`ARCHITECTURE.md` describes how the application works — module layout, the WebSocket
+protocol, data model, auth flow — and is accurate for those. It was written **before** the
+shipping work began, so its operational claims (§10 in particular) lag behind.
+
+**Where these documents conflict, `SHIPPING_PLAN.md` § Progress wins.** Do not "fix" code to
+match a stale doc; fix the doc.
+
 ## Stack
 
 - **Monorepo:** pnpm workspaces + Turborepo. Package scope `@sketchsync/*`.
 - **web:** Next.js 15 (App Router) + React 19 + TS + Tailwind v4 + Zustand + lucide-react. Port **3000**.
 - **api:** Express 5 + TS (HTTP). Port **3001**.
 - **realtime:** Node + `ws` WebSocket server + TS. Port **3002**.
-- **db:** Prisma + Postgres (**Neon**, ap-southeast-1). Also hosts the shared authz helpers.
+- **db:** Prisma + Postgres. **Local dev and the e2e suite run against a Postgres 16 container**
+  (`docker-compose.dev.yml`); **Neon** (ap-southeast-1) is the production/hosted target.
+  Also hosts the shared authz helpers.
 - **auth:** server-only JWT primitives shared by api + realtime (never imported by web).
 - **shared:** Zod schemas + inferred TS types (the single source of truth for cross-app contracts).
 - **config:** Zod-validated env loader. **typescript-config / eslint-config:** shared bases.
@@ -22,7 +38,7 @@ read-only UI, connection status + toasts, keyboard/empty-state pass). See "What'
 ## Layout
 
 ```
-apps/web        canvas engine + realtime client (route: /canvas)
+apps/web        canvas engine + realtime client (boards at /room/[slug])
 apps/api        auth + room HTTP routes
 apps/realtime   WebSocket gateway (auth, rooms, sync, presence)
 packages/auth   SERVER-ONLY token primitives: AUTH_COOKIE, signToken/verifyToken, TokenPayload
@@ -44,7 +60,7 @@ source (`exports: "./src/index.ts"`), no build step. Consumers compile them:
 - `pnpm dev` — web + api + realtime via Turborepo
 - `pnpm build` · `pnpm lint` · `pnpm typecheck` · `pnpm test` — all packages
 - `pnpm test:e2e` — Playwright browser suite (separate from `pnpm test`, which stays fast)
-- DB: `pnpm --filter @sketchsync/db exec prisma migrate deploy` (apply migrations, direct Neon URL);
+- DB: `pnpm --filter @sketchsync/db exec prisma migrate deploy` (apply migrations; direct, non-pooled URL);
   `... prisma generate` regenerates the client. Runs `prisma generate` on `postinstall`.
 
 ## Environment
@@ -55,9 +71,16 @@ startup (gitignored `.env`), platform injects real env in prod.
   (realtime verifies the cookie the API issues, and both read/write the same DB).
 - `packages/db/.env` holds `DATABASE_URL` for Prisma CLI.
 - web: **`API_ORIGIN`** (default `http://localhost:3001`) — **server-side, NOT `NEXT_PUBLIC_`**, used by
-  the `/api/:path*` rewrite. Because it is not inlined into the bundle, pointing an environment at a
-  different API is a restart, not a rebuild. `NEXT_PUBLIC_REALTIME_URL` (default `ws://localhost:3002`)
-  is still build-time inlined — the socket is not proxied (step 3b).
+  the `/api/:path*` rewrite. Not being `NEXT_PUBLIC_` keeps it out of the **browser** bundle, so the
+  API's real address is never exposed to clients — that part is unchanged and is why it is named
+  this way. **It is still a BUILD-TIME value, though: changing it is a REBUILD (a REDEPLOY on
+  Vercel), not a restart.** Next evaluates `rewrites()` during `next build` and freezes the result
+  into `.next/routes-manifest.json`; the server reads that manifest and never re-reads
+  `next.config.ts`. Verified: an image built against `http://api:3001` and run with a bogus
+  `API_ORIGIN` still proxied to `http://api:3001`. (Earlier revisions of this file said "a restart,
+  not a rebuild" — that was wrong. Full detail in `ARCHITECTURE.md` §8.)
+  `NEXT_PUBLIC_REALTIME_URL` (default `ws://localhost:3002`) is build-time inlined **into the
+  browser bundle** — the socket is not proxied, so it must be an address the browser can reach.
 - **No secrets in code.** Cookies are host-scoped; ports are irrelevant to cookie scope, which is why
   the `localhost:3000/3001/3002` split worked and a real cross-origin split does not (see below).
 
@@ -99,9 +122,12 @@ baseline is the Neon round trip.
 The API's CORS config is now **defence-in-depth, not load-bearing** — same-origin traffic never
 exercises it. It is kept because it still constrains anything calling port 3001 directly.
 
-**The WebSocket is NOT proxied** and remains cookie-authenticated, so it is still broken
-cross-origin. That is Phase 4 step 3b (a ticket via `Sec-WebSocket-Protocol` — never a query
-param, which would land in access logs, proxy logs, and browser history).
+**The WebSocket is NOT proxied** — a rewrite cannot proxy one — so it connects cross-origin
+and therefore cannot use the session cookie. **That was fixed in Phase 4.3b and is no longer
+pending:** the socket authenticates with a single-use ticket carried in
+`Sec-WebSocket-Protocol` (never a query param, which would land in access logs, proxy logs,
+and browser history), verified at the upgrade behind an Origin allowlist, with no cookie
+fallback. See "WebSocket ticket auth (Phase 4.3b)" below.
 
 ## HTTP API (apps/api)
 
@@ -541,7 +567,7 @@ skip it), reduced `memLevel`, and a `concurrencyLimit`.
   ~238 KB (realistic coords) / ~600 KB (worst-case doubles), both under the 1 MiB `maxPayload`.
 - `GET /health` on the same HTTP server → `{ ok, connections }` (live socket/limiter count).
 
-## Client canvas engine (apps/web, /canvas)
+## Client canvas engine (apps/web, route `/room/[slug]`)
 
 Modules under `lib/canvas/` (kept separate; hit-testing/geometry/ordering are pure & unit-testable):
 - **viewport** — pan/zoom, `screenToWorld`/`worldToScreen`, clamp scale [0.1, 8]. Pure, no DOM.

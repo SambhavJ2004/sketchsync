@@ -11,6 +11,35 @@ exists and this file describes what should exist.
 
 ---
 
+## Progress
+
+**THIS SECTION IS THE SOURCE OF TRUTH FOR PROJECT STATE.** Read it before doing anything
+else in this repo. Where any other document — `ARCHITECTURE.md`, `CLAUDE.md`, a code
+comment — disagrees with it, this section wins and the other document is stale.
+
+**Update it at the end of every phase.** A phase is not finished until its entry here says
+so. Prose elsewhere drifts; this list is what a new session is told to trust.
+
+- **Phase 0 — done.** Secrets rotated, `.gitignore` extended, git initialised, pushed to
+  the private repo `SambhavJ2004/sketchsync`. One branch per phase.
+
+- **Phase 1 — done.** Local Postgres via `docker-compose.dev.yml`; migrations applied with
+  `migrate deploy` and `sketchsync_insert_element` confirmed present. Dockerfiles for api,
+  realtime and web; full `docker-compose.yml` verified from a clean `down -v`. Images:
+  **api 752 MB, realtime 742 MB, web 448 MB**. The full e2e suite has been run against the
+  local containerized Postgres: **27 passed in 5.3 minutes, no flake.**
+
+- **Phase 2 — in progress.** `.github/workflows/ci.yml` with a `gate` job and a `docker`
+  job. `docker` was green on the first run. `gate` failed on turbo strict env mode — Turbo 2
+  strips variables a task does not declare, which is invisible locally because the apps read
+  `.env` off disk — fixed by declaring env vars **per task** in `turbo.json` rather than in
+  `globalEnv`, so cache keys stay granular. **E2E on a Linux runner is not yet verified.**
+
+- **Phases 3, 4 and 5 — not started.** Private boards and invites; deploy; README, demo and
+  resume, respectively.
+
+---
+
 ## Phase 0 — Git and secrets (do this before anything else)
 
 Right now there is no `.git` directory. That means **every edit Claude Code makes is

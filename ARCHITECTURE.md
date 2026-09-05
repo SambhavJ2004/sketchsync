@@ -644,13 +644,34 @@ env and the missing file is ignored.
 | `REALTIME_PORT` | yes | realtime | 3002 |
 | `NODE_ENV` | default `development` | api, realtime | Drives the cookie `secure` flag |
 | `WEB_ORIGIN` | default `http://localhost:3000` | api (CORS), realtime (**upgrade allowlist**) | On realtime this is a security control, not cosmetics |
-| `API_ORIGIN` | default `http://localhost:3001` | web, **server-side only** | Target of the `/api/*` rewrite. Deliberately **not** `NEXT_PUBLIC_`, so changing it is a restart, not a rebuild |
+| `API_ORIGIN` | default `http://localhost:3001` | web, **server-side only** | Target of the `/api/*` rewrite. Deliberately **not** `NEXT_PUBLIC_`, so it is never inlined into the browser bundle and the API's address is not exposed to clients. **But changing it is a REBUILD, not a restart** — see below |
 | `NEXT_PUBLIC_REALTIME_URL` | default `ws://localhost:3002` | web | **Build-time inlined** — the socket is not proxied, so changing it *is* a rebuild. Use `wss://` in production |
 | `NEXT_PUBLIC_E2E` | unset | web | `=1` installs the read-only test hook |
 | `E2E_WEB_ORIGIN` | default `http://localhost:3000` | e2e | |
 
 Env files: `apps/api/.env`, `apps/realtime/.env`, `packages/db/.env` (Prisma CLI),
 `apps/web/.env.local`. Each has a committed `.env.example`.
+
+**`API_ORIGIN` is a build-time value, despite not being `NEXT_PUBLIC_`.** These are two
+independent things and it is easy to conflate them:
+
+- *Not `NEXT_PUBLIC_`* means it is never inlined into the **browser** bundle. That is still
+  true and still the reason it is named this way — the browser talks only to `/api` on its
+  own origin and never learns where the API actually lives.
+- *Build-time* is about **when** the value is frozen. Next evaluates `rewrites()` during
+  `next build` and writes the result into `.next/routes-manifest.json`. The running server
+  reads that manifest; it does not re-read `next.config.ts`.
+
+Verified empirically: an image built with `API_ORIGIN=http://api:3001` and then **run** with
+`API_ORIGIN=http://this-host-does-not-exist:9999` still logged
+`Failed to proxy http://api:3001/auth/me`. In a `output: "standalone"` build the runtime
+directory contains only `server.js`, `package.json` and `node_modules` — there is no
+`next.config.ts` left to re-read.
+
+**Consequence: pointing an environment at a different API is a REBUILD, and on Vercel a
+REDEPLOY.** Changing the environment variable alone and restarting will silently keep
+proxying to the old address. Earlier revisions of this document and of `CLAUDE.md` claimed
+"a restart, not a rebuild"; that was wrong.
 
 Cookies are **host-scoped and ignore ports**, which is why the 3000/3001/3002 split works
 locally while a genuine cross-origin split does not.
@@ -699,11 +720,21 @@ pnpm --filter @sketchsync/db exec prisma generate
 There is **no vitest config file anywhere** — the suites run on Vitest defaults.
 
 **27 e2e tests** across 7 spec files (`01-open-gap`, `02-transport`, `03-collaboration`,
-`04-resilience`, `05-export`, `06-deferrals`, `07-states`), ~4.4–7.4 min, headless Chromium,
-`workers: 1` (they share one database and one gateway). Playwright starts all three services
-itself with **per-service readiness probes** — Turbo's combined output gives no per-service
-signal, and "the web server answered" does not imply the API or gateway are up. `globalSetup`
-absorbs Neon's cold start (~850 ms) and Next's per-route dev compile (board route ~7–12 s).
+`04-resilience`, `05-export`, `06-deferrals`, `07-states`), headless Chromium, `workers: 1`
+(they share one database and one gateway). Playwright starts all three services itself with
+**per-service readiness probes** — Turbo's combined output gives no per-service signal, and
+"the web server answered" does not imply the API or gateway are up. `globalSetup` absorbs
+database cold start and Next's per-route dev compile (board route ~7–12 s).
+
+**The suite runs against the LOCAL containerized Postgres** (`docker-compose.dev.yml`), not
+against Neon. It originally ran against hosted Neon — every run mutating a shared remote
+database and paying a wake-up — which is what Phase 1 existed to fix. Latest local run:
+**27 passed in 5.3 minutes, no flake.** `globalSetup`'s warm-up still matters, but against a
+local container the database portion is now negligible and the Next dev compile dominates.
+
+Because the servers read `.env` files off disk locally, a run with no `.env` present (CI)
+depends on env vars being declared per task in `turbo.json` — Turbo 2 strips undeclared
+variables in its default strict mode. See `SHIPPING_PLAN.md` § Progress, Phase 2.
 
 Design notes worth preserving:
 
@@ -741,44 +772,58 @@ or typecheck `db` with `pnpm exec tsc --noEmit` directly.
 
 ## 10. Docker / deployment
 
-**There is no Docker in this repository.** No `Dockerfile`, no `docker-compose.yml`, no
-`.dockerignore`, no `Containerfile` — verified by a full-tree search. There is also:
+> **Superseded in part.** This section originally recorded that the repo had no Docker, no
+> CI and no deployment config. Docker and CI now exist (Phases 1 and 2). Deployment does
+> not. `SHIPPING_PLAN.md` § Progress is the authority on what has actually landed.
 
-- **no CI configuration** (no `.github/`, no pipeline file of any kind),
-- **no deployment manifest** (no `vercel.json`, `fly.toml`, `render.yaml`, `Procfile`,
-  Terraform, or Kubernetes),
-- **no process manager or reverse-proxy config**,
-- **no root `README.md`**.
+**What exists now:**
 
-The only YAML in the tree is `pnpm-workspace.yaml` and `pnpm-lock.yaml`.
+| File | Purpose |
+| --- | --- |
+| `docker-compose.dev.yml` | Postgres only — the day-to-day database, used alongside `pnpm dev` on the host |
+| `docker-compose.yml` | Full stack: postgres → migrate → api + realtime → web |
+| `apps/api/Dockerfile` | Multi-stage; build context is the monorepo root |
+| `apps/realtime/Dockerfile` | Same shape |
+| `apps/web/Dockerfile` | Compose only; Vercel builds from source and ignores it |
+| `.dockerignore` | Excludes `**/node_modules`, build output, `.git`, `**/.env*` |
+| `.github/workflows/ci.yml` | `gate` job (typecheck → lint → build → test → e2e) and `docker` job (builds all three images) |
 
-What exists instead:
+Image sizes: **api 752 MB, realtime 742 MB, web 448 MB**.
+
+**What still does not exist:** any deployment manifest (no `vercel.json`, `fly.toml`,
+`render.yaml`, `Procfile`, Terraform, or Kubernetes), no process manager or reverse-proxy
+config, and no root `README.md`. Deploy is Phase 4; the README is Phase 5.
 
 | Concern | Actual mechanism |
 | --- | --- |
-| Running locally | `pnpm dev` → Turborepo runs three persistent `dev` tasks (`next dev`, two `tsx watch`) |
-| Running "built" | `tsup` → `dist/index.js` per service, started with `node dist/index.js` (`pnpm start`); web with `next start` |
-| Database | **Hosted Neon Postgres** (ap-southeast-1) over TLS. Nothing is containerized — there is no local Postgres to run |
-| Service orchestration in tests | Playwright's `webServer` array, which is the closest thing to an orchestrator in the repo |
-| Configuration | `.env` files per app + `loadEnv()` validation |
+| Local database | `docker compose -f docker-compose.dev.yml up -d` — **local Postgres 16 in a container**, used by `pnpm dev` and by the e2e suite |
+| Running locally | `pnpm dev` → Turborepo runs three persistent `dev` tasks (`next dev`, two `tsx watch`) on the host |
+| Whole stack in containers | `docker compose up --build` → app at `http://localhost:3000` |
+| Running "built" | `tsup` → `dist/index.js` per service (`node dist/index.js`); web via `output: "standalone"` |
+| Schema migration | One-shot `migrate` compose service; api and realtime gate on `service_completed_successfully` |
+| CI | GitHub Actions, `postgres:16` service container |
+| Configuration | `.env` files per app + `loadEnv()` validation; job-level env in CI |
 
-Anyone containerizing this should know:
+Things the containerization had to solve, kept here because each cost real debugging:
 
 1. The services are **not independently buildable from their own directories** — they consume
-   workspace packages as TS source, so a build context must include the whole monorepo plus
-   the lockfile.
-2. `@prisma/client` is kept external from the tsup bundle and needs its **native query
-   engine** present at runtime; `prisma generate` must run for the image's target platform.
-3. `web` needs `NEXT_PUBLIC_REALTIME_URL` **at build time** (it is inlined), while
-   `API_ORIGIN` is read at runtime. Those are different lifecycle stages inside one image.
+   workspace packages as TS source, so the build context is the monorepo root.
+2. `@prisma/client` is external to the tsup bundle and needs its **native query engine** at
+   runtime. `prisma generate` runs inside the image, and its output — which lands in a
+   *sibling* `.prisma/client` directory, not in `@prisma/client` — is relocated into the
+   `--prod` dependency tree.
+3. `web` needs `NEXT_PUBLIC_REALTIME_URL` at build time **and `API_ORIGIN` at build time too**
+   (see §8). Neither is a runtime knob.
 4. `WEB_ORIGIN` on the realtime service is a **security control**. Getting it wrong in an
    orchestrator either breaks every socket (403) or, set too loosely, removes the only
    protection against cross-site socket hijack.
 5. `realtime` holds room membership in **process memory**, so more than one replica needs
    sticky routing plus a cross-process fanout that does not exist yet.
 6. Neon should move to a pooled connection (`?pgbouncer=true` + Prisma `directUrl` for
-   migrations) before any many-replica deployment. This is the stated Phase 5 item and is
-   **not** wired into `schema.prisma`.
+   migrations) before any many-replica deployment. Still **not** wired into `schema.prisma`.
+7. `output: "standalone"` is opt-in via `NEXT_OUTPUT=standalone`, set only by
+   `apps/web/Dockerfile`. Enabling it unconditionally breaks `pnpm build` on Windows, where
+   the tracing step's symlinks fail with `EPERM` without Developer Mode.
 
 ---
 
@@ -903,9 +948,11 @@ confronting the underlying work.
     `page.route`/`dropSocket`, not by stopping processes); multi-tab same-user untested; no
     keyboard-layout coverage, so the non-US bracket-label path and the Firefox/Safari fallback
     are unverified; `role="alert"` is asserted as an *attribute*, never as an announcement.
-30. **Integration checks that need live servers plus Neon** (WS floods, oversized frames, the
-    200-concurrent-create race, socket-state release) are scripted `tsx` throwaways — written,
-    run, deleted. **They cannot run in CI as-is**, and there is no CI anyway.
+30. **Integration checks that need live servers plus a database** (WS floods, oversized
+    frames, the 200-concurrent-create race, socket-state release) are scripted `tsx`
+    throwaways — written, run, deleted. **They cannot run in CI as-is.** CI now exists
+    (`.github/workflows/ci.yml`), so this is a gap that could be closed rather than an
+    impossibility; nothing has been done about it.
 
 ### Stale documentation in the tree
 
