@@ -1,0 +1,102 @@
+// SketchSync database schema.
+// Phase 0: models only — no seeding, no application logic.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String
+  name         String
+  avatarUrl    String?
+  createdAt    DateTime @default(now())
+
+  ownedRooms  Room[]       @relation("RoomOwner")
+  memberships RoomMember[]
+  elements    Element[]    @relation("ElementCreatedBy")
+  wsTickets   WsTicket[]
+}
+
+/// Single-use, short-lived credential for opening a WebSocket.
+///
+/// The socket cannot use the session cookie: it must reach the realtime host
+/// directly and cross-origin (a Vercel rewrite does not proxy WebSockets), and
+/// cross-site cookies are not even stored. So the API mints a ticket over the
+/// same-origin /api proxy and the gateway redeems it at upgrade.
+///
+/// Only the SHA-256 hash is stored — a database leak must not yield usable
+/// credentials. Redemption is `DELETE ... RETURNING`, which is atomic, so two
+/// racing connections cannot both consume one ticket.
+model WsTicket {
+  /// SHA-256 of the ticket, hex. The raw value is returned to the client once.
+  tokenHash String   @id
+  userId    String   @db.Uuid
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+}
+
+model Room {
+  id        String   @id @default(uuid()) @db.Uuid
+  slug      String   @unique
+  name      String
+  ownerId   String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  owner    User         @relation("RoomOwner", fields: [ownerId], references: [id])
+  members  RoomMember[]
+  elements Element[]
+
+  @@index([ownerId])
+}
+
+model RoomMember {
+  id     String @id @default(uuid()) @db.Uuid
+  roomId String @db.Uuid
+  userId String @db.Uuid
+  role   Role
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@index([userId])
+}
+
+model Element {
+  id        String   @id @default(uuid()) @db.Uuid
+  roomId    String   @db.Uuid
+  type      String
+  data      Json
+  version   Int      @default(1)
+  createdBy String   @db.Uuid
+  // Controllable stacking order. FLOAT so a shape can be inserted BETWEEN two
+  // others without renumbering the room. Sync orders by (zIndex, createdAt).
+  zIndex    Float    @default(0)
+  // Deterministic tiebreaker when two zIndex values are equal.
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deleted   Boolean  @default(false)
+
+  room    Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  creator User @relation("ElementCreatedBy", fields: [createdBy], references: [id])
+
+  @@index([roomId, zIndex, createdAt])
+  @@index([createdBy])
+}

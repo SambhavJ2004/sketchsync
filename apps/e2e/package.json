@@ -1,0 +1,23 @@
+{
+  "name": "@sketchsync/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sketchsync/db": "workspace:*",
+    "@sketchsync/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@sketchsync/eslint-config": "workspace:*",
+    "@sketchsync/typescript-config": "workspace:*",
+    "@types/node": "^22.10.0",
+    "eslint": "^9.17.0",
+    "typescript": "^5.7.0"
+  }
+}

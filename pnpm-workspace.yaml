@@ -1,0 +1,22 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Allow these dependencies to run their install/build scripts.
+# esbuild backs `tsx` + `tsup`; sharp is Next.js image optimization;
+# the prisma packages download/generate the query engine + client.
+allowBuilds:
+  esbuild: true
+  sharp: true
+  prisma: true
+  "@prisma/client": true
+  "@prisma/engines": true
+  bcrypt: true
+
+onlyBuiltDependencies:
+  - esbuild
+  - sharp
+  - prisma
+  - "@prisma/client"
+  - "@prisma/engines"
+  - bcrypt

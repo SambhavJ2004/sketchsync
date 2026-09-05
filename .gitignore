@@ -1,0 +1,41 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build outputs
+dist/
+.next/
+out/
+build/
+
+# turbo
+.turbo/
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# env / secrets — never commit real values
+.env
+.env.*
+!.env.example
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# coverage
+coverage/
+
+apps/e2e/results.json
+apps/e2e/test-results/
+apps/e2e/playwright-report/
+.claude/settings.local.jsonrepomix-output.xml
+repomix-output.xml
