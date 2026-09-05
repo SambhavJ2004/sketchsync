@@ -1,0 +1,220 @@
+name: CI
+
+# The baseline gate from CLAUDE.md, run on every push and PR:
+#   pnpm typecheck && pnpm lint && pnpm build && pnpm test && pnpm test:e2e
+#
+# Split into separate steps rather than one chained command. The semantics are
+# identical — any failing step fails the job and stops the rest — but a red run
+# names the stage that broke instead of making you read a combined log.
+
+on:
+  push:
+  pull_request:
+
+# A new push to the same ref makes the in-flight run obsolete. The e2e job is
+# ~6-12 minutes, so without this a branch with rapid pushes queues runs that
+# nobody will read.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # gate — typecheck, lint, build, unit tests, e2e browser suite
+  # ---------------------------------------------------------------------------
+  gate:
+    runs-on: ubuntu-latest
+    # Suite is ~4.4-7.4 min locally and CI runners are slower; 30 covers install,
+    # a cold Next dev compile of every route, and the browser download.
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sketchsync
+          POSTGRES_PASSWORD: sketchsync
+          POSTGRES_DB: sketchsync
+        ports:
+          - 5432:5432
+        # Names the user AND database on purpose: a bare `pg_isready` reports
+        # true during initdb while the server still listens only on a unix
+        # socket, which would let the migrate step start too early.
+        options: >-
+          --health-cmd "pg_isready -U sketchsync -d sketchsync"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    # Job level, because .env files are gitignored and NOTHING sets these
+    # otherwise. They also have to reach the three servers Playwright spawns as
+    # child processes — those call process.loadEnvFile(), find no file, and fall
+    # through to the ambient environment, which is exactly this block.
+    env:
+      # No sslmode=require: the service container serves plain TCP.
+      DATABASE_URL: postgresql://sketchsync:sketchsync@localhost:5432/sketchsync
+
+      # DELIBERATELY IN PLAIN SIGHT, not a repo secret. It signs tokens for a
+      # throwaway database that exists for the length of one job. Putting it in
+      # secrets would imply it guards something and would break CI on forked
+      # PRs, where secrets are not available. Only the >= 16 char length matters
+      # (packages/config enforces it).
+      JWT_SECRET: sketchsync-ci-not-a-real-secret-0123456789
+
+      API_PORT: "3001"
+      REALTIME_PORT: "3002"
+
+      # The origin the BROWSER sends. On realtime this is the exact-match
+      # allowlist checked at WebSocket upgrade — wrong value and every socket
+      # 403s, which would fail the collaboration tests with a misleading error.
+      WEB_ORIGIN: http://localhost:3000
+
+      # Read by next.config.ts for the /api/* rewrite. Server-side only.
+      API_ORIGIN: http://localhost:3001
+
+      # Inlined into the browser bundle at build time; must be browser-reachable.
+      NEXT_PUBLIC_REALTIME_URL: ws://localhost:3002
+
+      # Installs the read-only inspection hook (lib/canvas/testHook.ts). The
+      # scene lives in a module-scoped store and never reaches the DOM, so
+      # without this the assertions have nothing to read.
+      #
+      # Note this also bakes the hook into `pnpm build` below. Harmless here —
+      # CI never deploys its build output — but it is why this must not be set
+      # in a release pipeline.
+      NEXT_PUBLIC_E2E: "1"
+
+      E2E_WEB_ORIGIN: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # BEFORE setup-node, not after: `cache: pnpm` needs pnpm on PATH to ask it
+      # for the store path. Reversing these two is a confusing "Some specified
+      # paths were not resolved" failure.
+      #
+      # No `version:` key — action-setup then reads `packageManager` from the
+      # root package.json (pnpm@11.10.0), so the lockfile format and CI can
+      # never drift apart.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `migrate deploy`, NEVER `db push`: db push diffs the schema and would
+      # not create the sketchsync_insert_element plpgsql function from migration
+      # 20260806130000. Without it, concurrent element creates race on zIndex —
+      # and the suite would still pass, because nothing here is concurrent
+      # enough to expose it.
+      - name: Apply migrations
+        run: pnpm --filter @sketchsync/db exec prisma migrate deploy
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      - name: Unit tests
+        run: pnpm test
+
+      # The runner ships no browsers. --with-deps also pulls the system
+      # libraries headless Chromium needs; chromium only, because
+      # playwright.config.ts defines exactly one project.
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      # Playwright starts api, realtime and web itself, each with its own
+      # readiness probe. `reuseExistingServer: !process.env.CI` means it always
+      # starts fresh here rather than adopting a stray process.
+      - name: End-to-end tests
+        run: pnpm test:e2e
+
+      # playwright.config.ts configures only the `list` and `json` reporters, so
+      # there is no playwright-report/ directory to upload. What does exist is
+      # more useful anyway: `trace: "retain-on-failure"` and
+      # `screenshot: "only-on-failure"` write per-test traces and screenshots
+      # into test-results/. Open a trace with `pnpm exec playwright show-trace`.
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: |
+            apps/e2e/test-results/
+            apps/e2e/results.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # docker — build all three images so a Dockerfile regression fails CI too
+  # ---------------------------------------------------------------------------
+  # Build only. Running them would need a database and would duplicate what the
+  # gate job already proves; the point here is that the images still BUILD.
+  # That is not a trivial property in this repo — the build does a real pnpm
+  # install, runs `prisma generate` inside the image, and relocates the
+  # generated client into a --prod dependency tree.
+  #
+  # Independent of `gate` (no `needs:`), so the two run in parallel and a
+  # Docker break is reported even when the test suite is red.
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Context is the MONOREPO ROOT for all three: the services consume
+      # workspace packages as raw TypeScript, so a per-app context cannot see
+      # the code it needs to compile.
+      - name: Build api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: false
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build realtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/realtime/Dockerfile
+          push: false
+          cache-from: type=gha,scope=realtime
+          cache-to: type=gha,mode=max,scope=realtime
+
+      # Both args are build-time. NEXT_PUBLIC_REALTIME_URL is inlined into the
+      # browser bundle and API_ORIGIN is frozen into routes-manifest.json by
+      # `next build`, so the values compiled here are the ones that would ship.
+      # These match docker-compose.yml so the build is representative.
+      - name: Build web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          build-args: |
+            NEXT_PUBLIC_REALTIME_URL=ws://localhost:3002
+            API_ORIGIN=http://api:3001
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
