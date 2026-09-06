@@ -1,0 +1,118 @@
+# Render blueprint — infrastructure as code for the two server processes.
+#
+# NOT YET DEPLOYED. This file exists so the deploy is reviewable in the repo and
+# in git history rather than living only in a dashboard where a changed value
+# leaves no trace.
+#
+# SCOPE: api and realtime only. `web` goes to Vercel, which builds from source
+# and ignores apps/web/Dockerfile entirely. The database is Neon, not Render.
+#
+# Every secret is declared with `sync: false`, which means "this service needs
+# this variable, and its value is set in the dashboard, not in git". Render
+# refuses to deploy until each one is populated, so a missing value is a blocked
+# deploy rather than a service that boots and fails on first request.
+
+services:
+  # ---------------------------------------------------------------------------
+  # api — Express HTTP service: auth, rooms, WebSocket ticket issuance
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: sketchsync-api
+    runtime: docker
+    # Build context is the MONOREPO ROOT, not apps/api. The services consume
+    # workspace packages as raw TypeScript, so a per-app context cannot see the
+    # code it needs to compile.
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    branch: main
+    region: singapore # co-located with Neon's ap-southeast-1
+    # `free` spins the service down after inactivity and cold-starts on the next
+    # request. Tolerable for the API; see the note on realtime below before
+    # copying this choice there.
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # Render injects PORT and probes the port the process listens on. This app
+      # reads API_PORT, so the two must agree; 10000 is Render's convention.
+      - key: PORT
+        value: 10000
+      - key: API_PORT
+        value: 10000
+      # Required by loadEnv() even though this service does not open a socket —
+      # the env schema is shared by both apps and validates the whole shape.
+      - key: REALTIME_PORT
+        value: 10000
+
+      # Neon POOLED connection string (`-pooler` host, `?pgbouncer=true`).
+      - key: DATABASE_URL
+        sync: false
+      # Neon DIRECT connection. Migrations only. A transaction-mode pooler
+      # cannot run DDL or hold the advisory locks `migrate deploy` takes.
+      - key: DIRECT_URL
+        sync: false
+
+      # MUST BE BYTE-IDENTICAL TO sketchsync-realtime's. This service signs the
+      # session cookie; the gateway verifies it. A mismatch is not a startup
+      # error — both services boot fine and every socket ticket silently fails.
+      - key: JWT_SECRET
+        sync: false
+
+      # Browser origin(s) allowed to call this API with credentials, as a
+      # comma-separated list (e.g. the Vercel production domain plus a custom
+      # domain). Exact match per entry.
+      - key: WEB_ORIGIN
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # realtime — WebSocket gateway: upgrade auth, rooms, sync, presence
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: sketchsync-realtime
+    runtime: docker
+    dockerfilePath: ./apps/realtime/Dockerfile
+    dockerContext: .
+    branch: main
+    region: singapore
+    # RECONSIDER `free` HERE BEFORE DEPLOYING. A spun-down instance drops every
+    # live WebSocket and cold-starts on the next upgrade, which for a
+    # collaborative canvas reads as "the board stopped syncing". Room membership
+    # is also in-process memory, so a restart clears presence for everyone.
+    plan: free
+    # Served by the SAME http server that handles upgrades, so a healthy
+    # response also proves the listener accepting sockets is up.
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      - key: PORT
+        value: 10000
+      - key: REALTIME_PORT
+        value: 10000
+      # Required by the shared env schema; this service issues no HTTP API.
+      - key: API_PORT
+        value: 10000
+
+      - key: DATABASE_URL
+        sync: false
+      # Declared for schema parity. This service never runs migrations, so it is
+      # optional in practice — see packages/config.
+      - key: DIRECT_URL
+        sync: false
+
+      # Identical to sketchsync-api's. See the note there.
+      - key: JWT_SECRET
+        sync: false
+
+      # THIS IS A SECURITY CONTROL, NOT COSMETICS. It is the exact-match
+      # allowlist checked at WebSocket upgrade, and since the socket credential
+      # became a client-supplied ticket it is the only thing preventing a
+      # cross-site WebSocket hijack. Comma-separated for multiple origins; each
+      # entry is compared with `===`. Never widen it to a wildcard or a suffix
+      # match. Too narrow breaks every socket with a 403 — loud, and the safe
+      # failure. Too wide fails silently and hands the board to any page.
+      - key: WEB_ORIGIN
+        sync: false

@@ -37,8 +37,44 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
   6m26s, including `test:e2e` on a Linux runner** — the suite is now verified in CI, not
   only locally. The `ci` branch is merged into `main`.
 
-- **Phases 3, 4 and 5 — not started.** Private boards and invites; deploy; README, demo and
-  resume, respectively.
+- **Phase 4 — in progress (code prep done, nothing deployed).** Three changes, full gate
+  green afterwards:
+  - **Pooled/direct database split.** `directUrl = env("DIRECT_URL")` added to the datasource
+    in `schema.prisma`, and `DIRECT_URL` added to the `packages/config` schema as
+    **optional** so the local Docker Postgres — which has no pooler — still boots without it.
+    Note the asymmetry found while doing this: it is optional for the *app*, but the Prisma
+    *CLI* refuses to run `migrate deploy` at all when `directUrl` is in the schema and the
+    variable is unset. So `DIRECT_URL` is now set anywhere migrations run — the three local
+    `.env` files, `ci.yml`, and the compose `migrate` service.
+  - **`WEB_ORIGIN` accepts a comma-separated list.** Parsed into an array in
+    `packages/config`; **matching is still `===` per entry.** This is the WebSocket upgrade
+    allowlist and the only thing preventing a cross-site hijack now that the credential is
+    client-supplied, so it was deliberately not relaxed to prefix or wildcard matching.
+    `isAllowedOrigin(origin, allowed = env.WEB_ORIGIN)` takes the list as an injectable
+    argument for testing. A single value with no comma is unchanged (it parses to a
+    one-element array). **7 new tests** in `apps/realtime` cover the multi-entry case,
+    including that a non-matching origin in a multi-entry list is still refused and that the
+    check has not degraded to prefix/suffix/substring matching. Realtime suite 89 → 96 tests.
+  - **`render.yaml`** at the repo root: two Docker web services (`sketchsync-api`,
+    `sketchsync-realtime`), both building from their Dockerfiles with the repo root as
+    context, `healthCheckPath: /health`, env vars declared with `sync: false` (declared, not
+    populated). `web` is not here — it goes to Vercel.
+
+  Gate after these changes: typecheck, lint, build, unit tests all green;
+  **e2e 27 passed in 3.5 minutes** against the local containerized Postgres.
+
+- **Phases 3 and 5 — not started.** Private boards and invites; README, demo and resume.
+
+### Why Phase 4 is being done before Phase 3
+
+**Deliberate reordering, not an oversight.** Phase 4 is configuration and deployment and
+barely touches application logic. Phase 3 rewrites the authorization model, and is being
+deferred until the codebase has been studied properly rather than rushed alongside a deploy.
+
+**The consequence, accepted knowingly:** until Phase 3 lands, boards are link-access —
+`POST /rooms/:slug/join` always grants EDITOR, and every 403 renders as "Join this board?",
+so *anyone with a URL can edit*. Therefore **the repo stays private and the deployed URL is
+shared selectively** until Phase 3 is done. Do not publicise the deployed link before then.
 
 ---
 

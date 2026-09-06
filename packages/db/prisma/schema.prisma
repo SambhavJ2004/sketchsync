@@ -16,7 +16,17 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  // Runtime connection. In production this is Neon's POOLED host
+  // (`-pooler` in the hostname, `?pgbouncer=true`), which survives many
+  // short-lived serverless connections.
   url      = env("DATABASE_URL")
+  // Migrations and introspection only. A transaction-mode pooler (PgBouncer /
+  // Supavisor) breaks DDL and the advisory locks `migrate deploy` takes, so
+  // Prisma needs a DIRECT, non-pooled host for those.
+  //
+  // Locally both point at the same Docker Postgres — it has no pooler, so
+  // there is nothing to bypass and the two URLs are identical.
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {

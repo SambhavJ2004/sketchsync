@@ -27,6 +27,57 @@ describe("Origin allowlist", () => {
   });
 });
 
+// WEB_ORIGIN may list several origins (comma-separated, parsed in
+// @sketchsync/config) so one deployment can serve a custom domain alongside a
+// preview domain. The matching rule does NOT relax to accommodate that: every
+// entry is still compared with `===`.
+describe("Origin allowlist — multiple configured origins", () => {
+  const list = ["https://sketchsync.app", "https://preview.sketchsync.app"];
+
+  it("accepts every entry in the list", () => {
+    expect(isAllowedOrigin("https://sketchsync.app", list)).toBe(true);
+    expect(isAllowedOrigin("https://preview.sketchsync.app", list)).toBe(true);
+  });
+
+  it("STILL REFUSES an origin that is not in the list", () => {
+    // The regression that matters: adding a second entry must not turn the
+    // check into "any origin passes".
+    expect(isAllowedOrigin("https://evil.example", list)).toBe(false);
+    expect(isAllowedOrigin("http://localhost:3000", list)).toBe(false);
+  });
+
+  it("does not degrade to prefix, suffix, or substring matching", () => {
+    // Each of these would pass under a looser rule and is a real hijack path.
+    expect(isAllowedOrigin("https://sketchsync.app.evil.test", list)).toBe(false);
+    expect(isAllowedOrigin("https://evil-sketchsync.app", list)).toBe(false);
+    expect(isAllowedOrigin("https://sketchsync.app.", list)).toBe(false);
+    expect(isAllowedOrigin("https://sub.sketchsync.app", list)).toBe(false);
+    expect(isAllowedOrigin("sketchsync.app", list)).toBe(false);
+  });
+
+  it("keeps per-entry exactness: scheme, port and trailing slash still matter", () => {
+    expect(isAllowedOrigin("http://sketchsync.app", list)).toBe(false); // scheme
+    expect(isAllowedOrigin("https://sketchsync.app:443", list)).toBe(false); // port
+    expect(isAllowedOrigin("https://sketchsync.app/", list)).toBe(false); // slash
+  });
+
+  it("a single-entry list behaves exactly as one configured origin", () => {
+    const one = ["https://sketchsync.app"];
+    expect(isAllowedOrigin("https://sketchsync.app", one)).toBe(true);
+    expect(isAllowedOrigin("https://preview.sketchsync.app", one)).toBe(false);
+  });
+
+  it("still allows an absent Origin regardless of list length", () => {
+    expect(isAllowedOrigin(undefined, list)).toBe(true);
+  });
+
+  it("refuses everything when the list is empty", () => {
+    // Not reachable through config (the schema rejects an empty list), but the
+    // function must not fail open if it ever were.
+    expect(isAllowedOrigin("https://sketchsync.app", [])).toBe(false);
+  });
+});
+
 describe("ticket extraction from Sec-WebSocket-Protocol", () => {
   it("reads the ticket when the marker leads", () => {
     expect(extractTicket(`${WS_TICKET_PROTOCOL}, abc123`)).toBe("abc123");

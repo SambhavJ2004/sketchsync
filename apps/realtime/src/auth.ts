@@ -24,14 +24,31 @@ export type UpgradeRejection = "origin" | "ticket";
  * supplies, that implicit protection is gone and this check is the only thing
  * standing between a malicious page and a cross-site WebSocket hijack.
  *
- * Semantics: if an `Origin` header is present it must match exactly. Browsers
- * ALWAYS send it on WebSocket upgrades, so this fully covers the browser attack
- * surface. A request with no `Origin` is non-browser tooling (tests, CLIs),
- * which could spoof any value anyway, so rejecting it would add no security.
+ * Semantics: if an `Origin` header is present it must match one of the
+ * configured origins EXACTLY. Browsers ALWAYS send it on WebSocket upgrades, so
+ * this fully covers the browser attack surface. A request with no `Origin` is
+ * non-browser tooling (tests, CLIs), which could spoof any value anyway, so
+ * rejecting it would add no security.
+ *
+ * `WEB_ORIGIN` may list several origins (comma-separated; parsed in
+ * @sketchsync/config), which is what lets one deployment serve, say, a custom
+ * domain and a preview domain. THE MATCH IS STILL `===` PER ENTRY. Do not
+ * "improve" this into a prefix test, a suffix test, an endsWith, or a regex:
+ * `https://app.example.com.evil.test` prefix-matches `https://app.example.com`,
+ * and a suffix test on `.example.com` matches an attacker-controlled subdomain.
+ * More entries is the supported way to allow more origins.
+ *
+ * `allowed` is injectable so the allowlist logic can be tested against several
+ * configurations without reloading module-level env — the same seam
+ * `allowTicket(userId, nowMs)` and `tryConsume(bucket, nowMs)` use. Production
+ * callers pass one argument.
  */
-export function isAllowedOrigin(origin: string | undefined): boolean {
+export function isAllowedOrigin(
+  origin: string | undefined,
+  allowed: readonly string[] = env.WEB_ORIGIN,
+): boolean {
   if (origin === undefined) return true; // non-browser client
-  return origin === env.WEB_ORIGIN;
+  return allowed.includes(origin); // exact match, per entry
 }
 
 /**

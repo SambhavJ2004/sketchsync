@@ -55,7 +55,7 @@
     // block reads env(DATABASE_URL).
     "typecheck": {
       "dependsOn": ["^typecheck"],
-      "env": ["DATABASE_URL"]
+      "env": ["DATABASE_URL", "DIRECT_URL"]
     },
 
     // apps/realtime's suites import src/env.ts transitively

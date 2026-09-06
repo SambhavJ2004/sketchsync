@@ -78,6 +78,9 @@ services:
     restart: "no"
     environment:
       DATABASE_URL: postgresql://sketchsync:sketchsync@postgres:5432/sketchsync
+      # Prisma's `directUrl`. Same host here — the container has no pooler — but
+      # it must be set, or `migrate deploy` refuses to run at all.
+      DIRECT_URL: postgresql://sketchsync:sketchsync@postgres:5432/sketchsync
     command: pnpm --filter @sketchsync/db exec prisma migrate deploy
     depends_on:
       postgres:

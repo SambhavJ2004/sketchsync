@@ -57,6 +57,11 @@ jobs:
       # No sslmode=require: the service container serves plain TCP.
       DATABASE_URL: postgresql://sketchsync:sketchsync@localhost:5432/sketchsync
 
+      # Prisma's `directUrl`. The service container has no pooler, so this is the
+      # same URL — but it must be SET: with directUrl in the schema, the CLI
+      # refuses to run `migrate deploy` when the variable is missing.
+      DIRECT_URL: postgresql://sketchsync:sketchsync@localhost:5432/sketchsync
+
       # DELIBERATELY IN PLAIN SIGHT, not a repo secret. It signs tokens for a
       # throwaway database that exists for the length of one job. Putting it in
       # secrets would imply it guards something and would break CI on forked

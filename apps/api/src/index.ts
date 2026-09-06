@@ -17,7 +17,11 @@ const app = express();
 // browser will police. Kept because it still constrains anything that DOES call
 // this port directly from a page (a stray tool, a misconfigured deploy that
 // exposes the API publicly), and removing it would silently widen that surface.
-app.use(cors({ origin: env.WEB_ORIGIN, credentials: true }));
+// `origin` takes an array as readily as a string, and `cors` compares each
+// entry with an exact string match — the same semantics as the single-value
+// form, just several of them. Passing the parsed list keeps this and the
+// realtime upgrade allowlist reading from one configured value.
+app.use(cors({ origin: [...env.WEB_ORIGIN], credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
