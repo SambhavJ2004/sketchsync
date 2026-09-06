@@ -702,7 +702,7 @@ pnpm --filter @sketchsync/db exec prisma generate
 
 ### Test inventory (verified by counting, not by trusting the docs)
 
-**143 unit tests** across 10 files:
+**150 unit tests** across 10 files:
 
 | File | Tests | Covers |
 | --- | ---: | --- |
@@ -710,8 +710,8 @@ pnpm --filter @sketchsync/db exec prisma generate
 | `apps/web/lib/canvas/export.test.ts` | 25 | Arrowhead geometry pinned against the pre-extraction formula, ink/union bounds incl. empty and zero-area, SVG viewBox in world units, stroke-width passthrough, the PNG size guard |
 | `apps/realtime/src/zorder.test.ts` | 19 | Renormalize threshold (strict `<`, float-boundary anchored), order preserved across a rewrite, only-changed rows emitted, a 400-element board, `resolveZ` collision re-placement |
 | `apps/web/lib/canvas/store.test.ts` | 17 | **Undo survives renormalization**, a full sync still clears it, one layer action = one outbound op, the style preview/commit split, the read-only role gate |
+| `apps/realtime/src/upgradeAuth.test.ts` | 17 | Origin allowlist (scheme/port/trailing-slash/`null` rejected, absent allowed) and the subprotocol parser. Also the multi-entry allowlist: every listed origin accepted, a non-listed one still refused, and no degradation to prefix/suffix/substring matching |
 | `apps/realtime/src/messages.test.ts` | 12 | The real `handleMessage` pipeline against a stub socket. Every path it exercises stops before authz touches Prisma, so **no DB is needed** — which is exactly where the refund policy lives |
-| `apps/realtime/src/upgradeAuth.test.ts` | 10 | Origin allowlist (scheme/port/trailing-slash/`null` rejected, absent allowed) and the subprotocol parser |
 | `apps/realtime/src/syncChunks.test.ts` | 9 | Chunk boundary math, order across boundaries, over-budget element emitted alone |
 | `apps/web/lib/roomName.test.ts` | 6 | Shared board-name bounds (trim-then-measure, 1..80) |
 | `apps/api/src/auth/ticketLimiter.test.ts` | 6 | Burst/refill, per-user isolation, a realistic reconnect flurry passing, a hostile loop bounded |

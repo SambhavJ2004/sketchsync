@@ -635,11 +635,13 @@ frame on the overlay only, prune when stale (5s) or on leave; emit throttled to 
 
 ## Testing / verification
 
-**Vitest** is wired at the repo root (`pnpm test` → `turbo run test`). Checked-in suites (**143 tests**)
+**Vitest** is wired at the repo root (`pnpm test` → `turbo run test`). Checked-in suites (**150 tests** across 10 files)
 cover the security- and correctness-relevant logic:
 - `apps/realtime/src/upgradeAuth.test.ts` — the Origin allowlist (scheme/port/trailing-slash/`null`
   all rejected; absent allowed for non-browser clients) and the `Sec-WebSocket-Protocol` parser
-  (marker order enforced, no ticket leaked into the hash).
+  (marker order enforced, no ticket leaked into the hash). Also the MULTI-ENTRY allowlist: every
+  listed origin accepted, a non-listed origin still refused, per-entry exactness preserved, and no
+  degradation to prefix/suffix/substring matching.
 - `apps/api/src/auth/ticketLimiter.test.ts` — issuance burst/refill, per-user isolation, a realistic
   reconnect flurry passing, and a hostile loop bounded to the refill rate.
 - `apps/realtime/src/zlock.test.ts` — the advisory-lock key string is pinned against the

@@ -37,8 +37,32 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
   6m26s, including `test:e2e` on a Linux runner** — the suite is now verified in CI, not
   only locally. The `ci` branch is merged into `main`.
 
-- **Phase 4 — in progress (code prep done, nothing deployed).** Three changes, full gate
-  green afterwards:
+- **Phase 4 — done. The app is deployed and working end to end.**
+
+  **Topology:**
+  - **Database — Neon.** Migrations applied with `migrate deploy` against the direct
+    (non-pooled) URL; the app runs on the pooled one.
+  - **Render — `sketchsync-api` and `sketchsync-realtime`**, both as **Docker** services in
+    **Singapore** on the **free** plan, created from the `render.yaml` blueprint and tracking
+    `main`.
+  - **Vercel — `apps/web`**, with the project's root directory set to `apps/web`, and
+    `API_ORIGIN` and `NEXT_PUBLIC_REALTIME_URL` set there. Both are build-time values, so
+    changing either is a redeploy, not a restart (see `ARCHITECTURE.md` §8).
+  - **`WEB_ORIGIN` on both Render services points at the Vercel domain.** On realtime that
+    is the WebSocket upgrade allowlist, so this value is what makes the socket work at all —
+    and it is the security control, not a convenience.
+
+  **Verified in the browser against the live deployment:** signup, board creation, and
+  multi-user drawing all work.
+
+  **Known operational caveat — the Render free plan sleeps after ~15 minutes idle, with
+  roughly a minute of cold start.** For a demo link this means the first visit after a quiet
+  period is slow, and it lands on the realtime gateway too: a sleeping socket service drops
+  live connections and clears in-process room presence on wake. This was flagged in
+  `render.yaml` before deploying and is accepted for now; upgrading the realtime service is
+  the fix if it becomes annoying.
+
+  **Code prep that preceded the deploy** (full gate green afterwards):
   - **Pooled/direct database split.** `directUrl = env("DIRECT_URL")` added to the datasource
     in `schema.prisma`, and `DIRECT_URL` added to the `packages/config` schema as
     **optional** so the local Docker Postgres — which has no pooler — still boots without it.
@@ -63,18 +87,38 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
   Gate after these changes: typecheck, lint, build, unit tests all green;
   **e2e 27 passed in 3.5 minutes** against the local containerized Postgres.
 
-- **Phases 3 and 5 — not started.** Private boards and invites; README, demo and resume.
+- **Phase 3 — still deliberately deferred.** Private boards and invites. See below.
 
-### Why Phase 4 is being done before Phase 3
+- **Phase 5 — in progress.** `README.md` written at the repo root: description, live link,
+  stack + CI badge, the architecture diagram reused from `ARCHITECTURE.md`, a three-part
+  "Interesting problems" section (the cross-origin WebSocket ticket handshake, the z-order
+  race, the size-weighted rate limiter), `docker compose up` quick start, tests, and an
+  honest known-limitations list. Every figure in it is taken from `ARCHITECTURE.md` or from
+  this section — nothing invented. **No screenshots or GIFs, by decision.**
+  - **`<LIVE_URL>` is still a placeholder** and must be filled in before the README is
+    useful to anyone.
+  - **The CI badge points at a private repo, so it will not render for a logged-out
+    viewer.** It resolves once the repo is public — which is gated on Phase 3, below.
+  - **Test count corrected to 150.** `ARCHITECTURE.md` and `CLAUDE.md` still say 143; that
+    predates the 7 origin-allowlist tests added during Phase 4 prep (realtime 89 → 96).
+    Verified by counting the suites directly. Those two documents should be updated.
+  - Still to do: demo and resume material.
+
+### Why Phase 4 was done before Phase 3
 
 **Deliberate reordering, not an oversight.** Phase 4 is configuration and deployment and
-barely touches application logic. Phase 3 rewrites the authorization model, and is being
-deferred until the codebase has been studied properly rather than rushed alongside a deploy.
+barely touches application logic. Phase 3 rewrites the authorization model, and is deferred
+until the codebase has been studied properly rather than rushed alongside a deploy.
 
-**The consequence, accepted knowingly:** until Phase 3 lands, boards are link-access —
-`POST /rooms/:slug/join` always grants EDITOR, and every 403 renders as "Join this board?",
-so *anyone with a URL can edit*. Therefore **the repo stays private and the deployed URL is
-shared selectively** until Phase 3 is done. Do not publicise the deployed link before then.
+**The consequence, accepted knowingly — and now live, not hypothetical:** until Phase 3
+lands, boards are link-access. `POST /rooms/:slug/join` always grants EDITOR and every 403
+renders as "Join this board?", so **anyone who has a board URL can edit that board**. There
+is now a real deployed URL for which that is true.
+
+Therefore **the repo stays private and the deployed URL is shared selectively** until Phase 3
+is done. Do not publicise the deployed link — in a README, on a resume, or anywhere public —
+before then. That is the first thing Phase 5 will want to do, so Phase 3 gates Phase 5 in
+practice even though nothing in the code enforces the order.
 
 ---
 
