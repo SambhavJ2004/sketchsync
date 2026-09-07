@@ -92,15 +92,19 @@ export function applyEviction(
   // the user — CanvasStage renders it as a keyed toast — so this is the strongest
   // signal available without a client change.
   //
-  // A richer signal (a real role-change message, the toolbar switching to
-  // read-only live) is client work. Until then the authoritative effect is the
-  // role rewrite above; this frame is the human-visible half.
+  // The client does NOT parse this text. On any `error` frame it re-asks the API
+  // what its role is and switches the toolbar in place — so the wording here is
+  // purely human-facing, and a reader changing it cannot break the behaviour.
+  // The authoritative effect is the role rewrite above.
   const message: ServerMessage = {
     type: "error",
+    // No "reload to continue": since 3c the client reconciles its role from the
+    // API when this frame arrives and switches the toolbar in place, so telling
+    // the user to reload would describe work the app has already done.
     message:
       request.role === "VIEWER"
-        ? "Your access to this board changed to view-only. Reload to continue."
-        : "Your role on this board changed. Reload to continue.",
+        ? "Your access to this board is now view-only."
+        : "Your role on this board changed.",
   };
   for (const conn of registry.connectionsFor(request.roomId, request.userId)) {
     if (conn.ws.readyState !== WebSocket.OPEN) continue;

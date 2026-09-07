@@ -1,5 +1,6 @@
 import {
   ServerMessage,
+  WS_CLOSE_EVICTED,
   WS_TICKET_PROTOCOL,
   type ClientMessage,
   type Element,
@@ -9,7 +10,13 @@ import {
 } from "@sketchsync/shared";
 import { ApiError } from "@/lib/api/client";
 
-export type RealtimeStatus = "connecting" | "open" | "closed" | "signedOut";
+export type RealtimeStatus =
+  | "connecting"
+  | "open"
+  | "closed"
+  | "signedOut"
+  /** Removed from the board by an owner. Terminal, like signedOut. */
+  | "evicted";
 
 export interface RealtimeHandlers {
   /** `keepIds` are elements drawn during the connect window that the
@@ -31,6 +38,16 @@ export interface RealtimeHandlers {
    * client stops retrying and the app should route to sign-in.
    */
   onSignedOut?: () => void;
+  /**
+   * An owner removed this user from the board. TERMINAL — no reconnect.
+   *
+   * Distinguished from an ordinary drop by the close code the gateway sends
+   * (WS_CLOSE_EVICTED). Without that, this would look like any other close and
+   * the backoff loop would immediately try to reconnect, minting a ticket and
+   * getting refused at `join` over and over — the client fighting a deliberate
+   * eviction, several times a second at first.
+   */
+  onEvicted?: () => void;
 }
 
 const MAX_BACKOFF_MS = 8000;
@@ -128,6 +145,19 @@ export class RealtimeClient {
     };
     ws.onmessage = (ev) => this.dispatch(ev.data);
     ws.onclose = (ev) => {
+      // EVICTION IS TERMINAL. The gateway closes with a specific application
+      // code when an owner removes this user from the board; membership is
+      // re-checked on `join`, so every reconnect would be refused anyway.
+      // Retrying would just burn tickets and hammer the gateway.
+      if (ev.code === WS_CLOSE_EVICTED) {
+        this.disposed = true;
+        this.opened = false;
+        this.resetSync();
+        this.handlers.onStatus?.("evicted");
+        this.handlers.onEvicted?.();
+        return;
+      }
+
       // Never reached `onopen` -> the handshake itself was refused.
       const handshakeFailed = ev.target === ws && this.ws === ws && !this.opened;
       if (handshakeFailed) this.handshakeFailures += 1;

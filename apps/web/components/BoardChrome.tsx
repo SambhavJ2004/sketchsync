@@ -4,14 +4,24 @@ import { useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Check, Link2 } from "lucide-react";
 import { SignOutButton } from "@/lib/auth/SignOutButton";
+import type { Role } from "@/lib/api/client";
 import { ExportMenu } from "./ExportMenu";
+import { SharePanel } from "./SharePanel";
 
 /**
  * Unobtrusive top-right board chrome: back-to-boards, board name, a "Copy link"
  * button (copies the /room/[slug] URL), and sign-out. The canvas is the point,
  * so this stays a compact pill.
  */
-export function BoardChrome({ name, slug }: { name: string; slug: string }) {
+export function BoardChrome({
+  name,
+  slug,
+  role,
+}: {
+  name: string;
+  slug: string;
+  role: Role;
+}) {
   const [copied, setCopied] = useState(false);
 
   async function copyLink() {
@@ -51,6 +61,7 @@ export function BoardChrome({ name, slug }: { name: string; slug: string }) {
           <Link2 className="h-[18px] w-[18px]" strokeWidth={2} />
         )}
       </button>
+      <SharePanel slug={slug} role={role} />
       <ExportMenu boardName={name} />
       <SignOutButton compact />
     </div>

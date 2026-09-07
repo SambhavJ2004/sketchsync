@@ -25,6 +25,10 @@ export const REALTIME_URL =
   process.env.NEXT_PUBLIC_REALTIME_URL ?? "ws://localhost:3002";
 
 export type Role = "OWNER" | "EDITOR" | "VIEWER";
+/** Roles an invite or a role change may grant. OWNER is deliberately excluded —
+ *  a board has one owner and no transfer route (see @sketchsync/shared). */
+export type GrantableRole = "EDITOR" | "VIEWER";
+export type Visibility = "PRIVATE" | "LINK";
 
 /** Safe user shape returned by the api (never the passwordHash). */
 export interface AuthUser {
@@ -40,7 +44,39 @@ export interface RoomSummary {
   slug: string;
   name: string;
   ownerId: string;
+  visibility: Visibility;
   role: Role;
+}
+
+/** One member of a board (GET /rooms/:slug/members). */
+export interface MemberView {
+  userId: string;
+  name: string;
+  email: string;
+  avatarUrl: string | null;
+  role: Role;
+  /** True for `Room.ownerId`. The owner cannot be removed or demoted. */
+  isOwner: boolean;
+}
+
+/** An invite as the owner sees it. NEVER carries the token. */
+export interface InviteView {
+  id: string;
+  role: Role;
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string;
+  maxUses: number;
+  usedCount: number;
+  revokedAt: string | null;
+  /** Derived server-side: would this be accepted right now? */
+  active: boolean;
+}
+
+/** The one response that carries a raw token — shown once, never recoverable. */
+export interface CreatedInvite extends InviteView {
+  token: string;
+  acceptUrl: string;
 }
 
 /** GET /rooms/:slug adds the member count. */
@@ -57,12 +93,19 @@ export interface FieldIssue {
 /**
  * Thrown for any non-2xx response. `status` lets callers branch (401/403/404),
  * `issues` carries per-field Zod errors for form display.
+ *
+ * `visibility` rides on a 403 from the room routes. Before private boards, every
+ * 403 meant "you could join this if you asked", and the board page rendered all
+ * of them as a join prompt. Now PRIVATE means "you cannot join without an
+ * invite" and LINK means "you may join" — two different screens that the status
+ * code alone cannot distinguish.
  */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
     readonly issues?: FieldIssue[],
+    readonly visibility?: Visibility,
   ) {
     super(message);
     this.name = "ApiError";
@@ -72,6 +115,7 @@ export class ApiError extends Error {
 interface ErrorBody {
   message?: string;
   issues?: FieldIssue[];
+  visibility?: Visibility;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -102,6 +146,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       res.status,
       err.message ?? `Request failed (${res.status})`,
       err.issues,
+      err.visibility,
     );
   }
   return body as T;
@@ -166,6 +211,58 @@ export const api = {
   },
   joinRoom(slug: string) {
     return request<RoomSummary>(`/rooms/${encodeURIComponent(slug)}/join`, {
+      method: "POST",
+    });
+  },
+  /** Rename and/or change visibility. OWNER only; the API enforces it. */
+  updateRoom(slug: string, patch: { name?: string; visibility?: Visibility }) {
+    return request<RoomSummary>(`/rooms/${encodeURIComponent(slug)}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    });
+  },
+
+  // ── Members ───────────────────────────────────────────────────────────
+  listMembers(slug: string) {
+    return request<MemberView[]>(`/rooms/${encodeURIComponent(slug)}/members`);
+  },
+  updateMemberRole(slug: string, userId: string, role: GrantableRole) {
+    return request<{ userId: string; role: Role }>(
+      `/rooms/${encodeURIComponent(slug)}/members/${encodeURIComponent(userId)}`,
+      { method: "PATCH", body: JSON.stringify({ role }) },
+    );
+  },
+  removeMember(slug: string, userId: string) {
+    return request<{ ok: true; userId: string }>(
+      `/rooms/${encodeURIComponent(slug)}/members/${encodeURIComponent(userId)}`,
+      { method: "DELETE" },
+    );
+  },
+
+  // ── Invites ───────────────────────────────────────────────────────────
+  /** Mint an invite. The response is the ONLY time the raw token exists. */
+  createInvite(
+    slug: string,
+    input: { role: GrantableRole; expiresInHours: number; maxUses: number },
+  ) {
+    return request<CreatedInvite>(`/rooms/${encodeURIComponent(slug)}/invites`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+  listInvites(slug: string) {
+    return request<InviteView[]>(`/rooms/${encodeURIComponent(slug)}/invites`);
+  },
+  revokeInvite(slug: string, inviteId: string) {
+    return request<{ ok: true; alreadyRevoked: boolean }>(
+      `/rooms/${encodeURIComponent(slug)}/invites/${encodeURIComponent(inviteId)}`,
+      { method: "DELETE" },
+    );
+  },
+  /** Redeem an invite. 401 = not signed in, 404 = unknown, 410 = expired /
+   *  revoked / used up (the message says which). */
+  acceptInvite(token: string) {
+    return request<RoomSummary>(`/invites/${encodeURIComponent(token)}/accept`, {
       method: "POST",
     });
   },

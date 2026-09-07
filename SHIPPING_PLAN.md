@@ -227,9 +227,68 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
   (`db:typecheck` hit the documented Windows `EPERM … query_engine` first — a dev server I
   had started was still holding the DLL. Stopping stray node processes cleared it.)
 
-  **Still to do:** 3b client (403 screen, `/invite/[token]` route, owner panel), 3c wiring,
-  and e2e coverage for the access paths themselves — including eviction, which currently has
-  no browser-level test.
+  **Step 3 of 4 done: client UI.** First step touching `apps/web`.
+
+  - **The 403 split.** `app/room/[slug]/page.tsx` rendered *every* 403 as "Join this
+    board?", which became an offer that could only fail once private boards existed. It now
+    branches on the `visibility` the 403 body carries: LINK keeps the join prompt, PRIVATE
+    gets a "You don't have access" screen with **no join button** and a way back. Absent or
+    unknown visibility is treated as PRIVATE — refusing to offer a join is the safe
+    direction, and an older API that omits the field would otherwise fall straight back into
+    the bug.
+  - **`SharePanel`** in the board chrome, built as a popover matching `ExportMenu` — same
+    capture-phase keyboard isolation (without it, typing an invite's use count would also
+    drive the canvas), same outside-click close, same focus return. The **member list is
+    visible to any member**; visibility toggle, invite creation and member management are
+    **owner-only and not rendered at all** for anyone else. The owner's row shows a static
+    "Owner" badge with no controls rather than controls the server would reject.
+  - **Invite creation** shows the raw token **once**, in an amber panel saying it will not be
+    shown again, with a copy button and a selectable field for when the clipboard is blocked.
+    It is dropped from state when the panel closes, because it is unrecoverable anyway and
+    leaving it on screen invites the belief it can be re-read.
+  - **`/invite/[token]`** redeems and redirects. Deliberately NOT wrapped in `<Protected>` —
+    that bounces to `/signin` without a return path, losing the token, which is the one thing
+    the page exists to carry. Not-signed-in routes through `?next=/invite/<token>` and comes
+    back. Failures branch by **status**, not message text: 404 invalid, 410 expired/revoked/
+    used (the API's own wording says which), 401 sign-in. Redemption is guarded by a ref so
+    React StrictMode's double-effect cannot spend two uses.
+  - **Eviction.** The socket treats `WS_CLOSE_EVICTED` as terminal — sets `disposed` and does
+    not reconnect. Without that the backoff loop would fight a deliberate eviction, minting
+    tickets and being refused at `join` several times a second. Renders a blocking overlay,
+    not a toast: the board behind is stale and the socket is gone, so letting the user keep
+    drawing into a dead canvas would lose work silently.
+  - **Demotion without reload.** On any `error` frame the client **re-asks the API for its
+    role** (debounced 3 s) rather than pattern-matching the message text, and pushes it into
+    the store. The API is the authority, and this also covers any future cause of a
+    mid-session role change. `CanvasStage` now tracks a `liveRole` because the prop is fetched
+    once at page load and goes stale the moment an owner changes it.
+  - **Backend copy corrected.** The demotion message said "Reload to continue", written in 3b
+    when no client support existed. It now says "Your access to this board is now view-only."
+    and the comment records that the client never parses this text.
+
+  **Verified in a real browser** (this step ships no automated coverage — see below). A new
+  board is PRIVATE; the owner panel shows Private pressed, invite form, and the owner badge;
+  creating a VIEWER invite shows the token once and lists "Viewer · 1d left · 1 of 1 left";
+  `GET /invites` leaks no token; a stranger gets the no-access screen with **no join button**;
+  redeeming lands in the board read-only; a viewer sees the member list and **zero** owner
+  controls; reusing the spent invite says "This invite link has already been used."; removing
+  a live member closes their socket (gateway logged `closed=1`, connections 1 → 0), shows the
+  overlay, and **stays at 0 connections with zero upgrade attempts for 10+ s**; demoting a
+  live editor logs `closed=0 updated=1`, keeps the socket, and flips the toolbar to read-only
+  with `navigationCount` still 1 — no reload. Promoting back restores editing, with the toast
+  captured via a MutationObserver.
+
+  **Gate: green.** typecheck, lint, build, 205 unit tests, e2e 27/27 in 2.8 min.
+
+  **Incidental finding, pre-existing and out of scope:** `POST /auth/ws-ticket` does not check
+  that the user still exists, so a valid JWT for a deleted user hits a
+  `WsTicket_userId_fkey` violation and 500s instead of returning a clean 401. `GET /auth/me`
+  handles this case (clears the cookie, 401); ticket issuance does not. Surfaced by deleting
+  test users while a browser tab still held their cookie.
+
+  **Still to do (3d):** e2e coverage for every access path — private-board 403, invite
+  redemption, revocation, member management and eviction all currently have **no browser
+  test**, and this step added a lot of UI that only manual verification has touched.
 
 - **Phase 5 — in progress.** `README.md` written at the repo root: description, live link,
   stack + CI badge, the architecture diagram reused from `ARCHITECTURE.md`, a three-part

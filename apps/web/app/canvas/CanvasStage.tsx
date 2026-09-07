@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Eye } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { Eye, Lock } from "lucide-react";
+import { Button } from "@/components/ui";
 import {
   MAX_TEXT_LENGTH,
   type ElementData,
@@ -118,7 +120,44 @@ export function CanvasStage({ roomId, roomName, slug, user, role }: Props) {
   // authority; this only stops a VIEWER from rendering work that would be
   // rejected and lost. Mirrors ROLE_RANK in @sketchsync/db, which cannot be
   // imported here — it is Prisma-backed and server-only.
-  const canEdit = role === "OWNER" || role === "EDITOR";
+  /**
+   * The role as it stands RIGHT NOW, which is not always the prop.
+   *
+   * `role` is fetched once when the board page loads. An owner can demote a
+   * member while they are sitting on the board, and the gateway rewrites the
+   * role on the live connection — so the prop goes stale mid-session. This
+   * mirrors the server's view and is what the UI reads.
+   */
+  const [liveRole, setLiveRole] = useState<Role>(role);
+  useEffect(() => setLiveRole(role), [role]);
+  const canEdit = liveRole === "OWNER" || liveRole === "EDITOR";
+
+  /** Set when an owner removes this user mid-session. Terminal. */
+  const [evicted, setEvicted] = useState(false);
+
+  /**
+   * Re-ask the API for this user's role and push it into the store.
+   *
+   * Called when the gateway sends an `error` frame, which is how a demotion
+   * surfaces. Debounced so a burst of unrelated errors is one request; a 403
+   * here means access was removed entirely, which the socket close handles.
+   */
+  const reconcileAt = useRef(0);
+  const reconcileRole = useCallback(async () => {
+    const now = Date.now();
+    if (now - reconcileAt.current < 3000) return;
+    reconcileAt.current = now;
+    try {
+      const fresh = await api.getRoom(slug);
+      setLiveRole(fresh.role);
+      useCanvasStore
+        .getState()
+        .setCanEdit(fresh.role === "OWNER" || fresh.role === "EDITOR");
+    } catch {
+      // Unreachable or refused. The socket's own signals cover the cases that
+      // matter; a failed reconciliation must not disturb the board.
+    }
+  }, [slug]);
 
   const tool = useCanvasStore((s) => s.tool);
   const style = useCanvasStore((s) => s.style);
@@ -497,6 +536,18 @@ export function CanvasStage({ roomId, roomName, slug, user, role }: Props) {
         onError: (m) => {
           console.warn("[realtime]", m);
           show(m, { key: "realtime-error" });
+          // A demotion arrives as an `error` frame (the gateway cannot send a
+          // role without adding a message type, and the client silently drops
+          // unknown types). Rather than pattern-matching the message text, ask
+          // the API what this user's role actually is — it is the authority, and
+          // this also covers any future cause of a mid-session role change.
+          // Debounced, because `error` is also emitted for ordinary bad frames.
+          void reconcileRole();
+        },
+        // Removed from the board by an owner. Terminal — the socket does not
+        // reconnect, so this renders a dead end rather than a retry.
+        onEvicted: () => {
+          setEvicted(true);
         },
         // A mutation the client could not transmit. Before this it produced
         // nothing in production: no error, no log, no counter the user could see.
@@ -550,7 +601,7 @@ export function CanvasStage({ roomId, roomName, slug, user, role }: Props) {
         useCanvasStore.getState().setOutbound(() => {});
       }
     };
-  }, [roomId, user.id, canEdit, show]);
+  }, [roomId, user.id, canEdit, show, reconcileRole]);
 
   const commitText = (): void => {
     const value = textValue.trim();
@@ -617,6 +668,31 @@ export function CanvasStage({ roomId, roomName, slug, user, role }: Props) {
         />
       )}
 
+      {/* REMOVED MID-SESSION. A blocking overlay, not a toast: the board behind
+          is stale and the socket is gone for good, so letting the user keep
+          drawing into a dead canvas would lose work silently — exactly the
+          failure class the connection pill exists to prevent. */}
+      {evicted && (
+        <div
+          data-testid="evicted-overlay"
+          className="absolute inset-0 z-[60] flex items-center justify-center bg-slate-50/95 p-8 backdrop-blur-sm"
+        >
+          <div className="flex max-w-sm flex-col items-center gap-4 rounded-2xl bg-white p-6 text-center shadow-md ring-1 ring-slate-900/5">
+            <Lock className="h-6 w-6 text-slate-400" strokeWidth={2} />
+            <h1 className="text-lg font-semibold text-slate-900">
+              You no longer have access to this board
+            </h1>
+            <p className="text-sm text-slate-500">
+              The board&apos;s owner removed you. Anything you drew before now was
+              saved; anything after this point was not.
+            </p>
+            <Link href="/rooms">
+              <Button>Back to boards</Button>
+            </Link>
+          </div>
+        </div>
+      )}
+
       {/* Empty-board hint. The grid alone gives a new user nothing to act on,
           and for a VIEWER "empty" and "still loading" look identical. */}
       {isEmpty && (
@@ -646,7 +722,7 @@ export function CanvasStage({ roomId, roomName, slug, user, role }: Props) {
       <ConnectionStatus status={status} hasConnected={hasConnected} />
 
       <div className="absolute right-3 top-3 z-40 flex flex-col items-end gap-2">
-        <BoardChrome name={roomName} slug={slug} />
+        <BoardChrome name={roomName} slug={slug} role={liveRole} />
         <PresencePanel users={presence} myUserId={myUserId} />
       </div>
 
