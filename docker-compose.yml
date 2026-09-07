@@ -102,6 +102,12 @@ services:
       JWT_SECRET: ${JWT_SECRET:-sketchsync-local-compose-secret-change-me}
       # The BROWSER's origin, not a service name.
       WEB_ORIGIN: http://localhost:3000
+      # Shared secret for the one api -> realtime call (POST /internal/evict).
+      # Must match realtime's exactly, hence one variable feeding both.
+      INTERNAL_SECRET: ${INTERNAL_SECRET:-sketchsync-local-compose-internal-change-me}
+      # SERVICE NAME here, unlike NEXT_PUBLIC_REALTIME_URL: this call is made by
+      # the api container inside the compose network, not by a browser.
+      REALTIME_INTERNAL_URL: http://realtime:3002
     ports:
       # Published for debugging and for pointing the e2e suite here. The browser
       # never uses it — it reaches this service through web's /api/* proxy.
@@ -128,6 +134,9 @@ services:
       # browser sends. This is the only thing preventing a cross-site socket
       # hijack now that the credential is a client-supplied ticket.
       WEB_ORIGIN: http://localhost:3000
+      # Same value as api's. A mismatch is not a startup error — every eviction
+      # is simply refused with a 403 the API logs and swallows.
+      INTERNAL_SECRET: ${INTERNAL_SECRET:-sketchsync-local-compose-internal-change-me}
     ports:
       # MUST be published: the browser connects here directly. The socket is
       # not proxied through web — a rewrite cannot proxy a WebSocket.

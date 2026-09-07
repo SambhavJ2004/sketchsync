@@ -1,10 +1,9 @@
 import { z } from "zod";
 
-/**
- * Runtime environment contract. Secrets (DATABASE_URL, JWT_SECRET) are required
- * with NO default values. Non-secret operational settings (NODE_ENV, WEB_ORIGIN)
- * have safe local-dev defaults. Ports are coerced from strings.
- */
+// Runtime environment contract. Secrets (DATABASE_URL, JWT_SECRET) are required
+// with NO default values. Non-secret operational settings (NODE_ENV, WEB_ORIGIN)
+// have safe local-dev defaults. Ports are coerced from strings.
+
 /**
  * Comma-separated list of allowed browser origins, parsed into an array.
  *
@@ -83,6 +82,53 @@ const EnvSchema = z.object({
    * behaves exactly as it did before.
    */
   WEB_ORIGIN: OriginList,
+
+  /**
+   * Shared secret guarding `POST /internal/evict` on the realtime gateway.
+   *
+   * Must be BYTE-IDENTICAL on api and realtime: api sends it, realtime compares
+   * it. Not a user credential and never seen by a browser — it authenticates one
+   * service to the other, nothing more.
+   *
+   * OPTIONAL, with a production check below. Locally, leaving it unset simply
+   * disables eviction: the gateway refuses every internal call and the API skips
+   * making them. That degrades to exactly the pre-eviction behaviour (a demoted
+   * user keeps their socket until they reconnect), which is a correct system —
+   * just a slower-reacting one — so it is not worth blocking `pnpm dev` over.
+   */
+  INTERNAL_SECRET: z.string().min(16).optional(),
+
+  /**
+   * Where api reaches realtime for that call. API-side only.
+   *
+   * An INTERNAL address: the compose service name (`http://realtime:3002`) or
+   * the Render service URL. Not the browser-facing socket URL, and not
+   * NEXT_PUBLIC_ anything — no client ever sees this.
+   */
+  REALTIME_INTERNAL_URL: z.string().url().default("http://localhost:3002"),
+});
+
+/**
+ * Production requires the internal secret; local development does not.
+ *
+ * Enforced here rather than by making the field non-optional, because the two
+ * environments genuinely differ: a deployed gateway is reachable and must not
+ * accept unauthenticated internal calls, while a local one is on localhost and
+ * eviction is an optional convenience. Failing the boot of a deployed service is
+ * the right outcome — silently running production without the secret would mean
+ * eviction quietly never works, which is precisely the failure this phase set
+ * out to remove.
+ */
+const EnvSchemaChecked = EnvSchema.superRefine((env, ctx) => {
+  if (env.NODE_ENV === "production" && !env.INTERNAL_SECRET) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["INTERNAL_SECRET"],
+      message:
+        "is required in production (shared secret for POST /internal/evict; " +
+        "must match on api and realtime)",
+    });
+  }
 });
 
 export type Env = z.infer<typeof EnvSchema>;
@@ -97,7 +143,7 @@ let cached: Env | undefined;
 export function loadEnv(env: NodeJS.ProcessEnv = process.env): Env {
   if (cached) return cached;
 
-  const parsed = EnvSchema.safeParse(env);
+  const parsed = EnvSchemaChecked.safeParse(env);
   if (!parsed.success) {
     const issues = parsed.error.issues
       .map((issue) => `  - ${issue.path.join(".") || "(root)"}: ${issue.message}`)

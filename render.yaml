@@ -66,6 +66,23 @@ services:
       - key: WEB_ORIGIN
         sync: false
 
+      # Shared secret for POST /internal/evict on sketchsync-realtime — the one
+      # call this service makes to that one. MUST BE BYTE-IDENTICAL to the value
+      # set on sketchsync-realtime. A mismatch is not a boot failure: every
+      # eviction is refused with a 403 that this service logs and swallows, and
+      # role changes silently go back to "applies on next reconnect".
+      #
+      # REQUIRED IN PRODUCTION — packages/config fails the boot without it, on
+      # purpose, because a deployed gateway must never accept unauthenticated
+      # internal calls.
+      - key: INTERNAL_SECRET
+        sync: false
+
+      # Where to reach the gateway for that call. The sketchsync-realtime
+      # service URL, NOT the browser-facing wss:// socket URL.
+      - key: REALTIME_INTERNAL_URL
+        sync: false
+
   # ---------------------------------------------------------------------------
   # realtime — WebSocket gateway: upgrade auth, rooms, sync, presence
   # ---------------------------------------------------------------------------
@@ -115,4 +132,11 @@ services:
       # match. Too narrow breaks every socket with a 403 — loud, and the safe
       # failure. Too wide fails silently and hands the board to any page.
       - key: WEB_ORIGIN
+        sync: false
+
+      # Identical to sketchsync-api's. This service COMPARES it on every
+      # POST /internal/evict; without it, the endpoint refuses everything, which
+      # is the correct fail-closed direction — eviction is best-effort, never the
+      # security boundary (membership is re-checked on join regardless).
+      - key: INTERNAL_SECRET
         sync: false

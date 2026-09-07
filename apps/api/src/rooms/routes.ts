@@ -15,6 +15,9 @@ import { acceptInvite, issueInvite, toInviteView } from "./invites.js";
 // The no-owner-left-behind rule. Extracted and pure so it is unit-tested
 // directly rather than only through the two routes that call it.
 import { refuseIfOwnerTarget } from "./ownerGuard.js";
+// The one api -> realtime call. Fire-and-forget and NOT the security
+// boundary — membership is still re-checked on join. See evict.ts.
+import { notifyEviction } from "./evict.js";
 
 export const roomRouter: Router = Router();
 
@@ -270,10 +273,16 @@ roomRouter.patch(
       select: { role: true },
     });
 
-    // A demotion does NOT take effect on a live socket: apps/realtime snapshots
-    // conn.role at `join` and the two services never talk to each other. The
-    // change applies on their next connect. Accepted and documented (Phase 3
-    // design, option (a)); an eviction hook is step 3-later, not this one.
+    // Take effect on any LIVE socket too, not just on their next connect.
+    // Best-effort: if the gateway is unreachable this returns 200 anyway and the
+    // change still applies when they reconnect, because `join` re-reads the role.
+    notifyEviction({
+      action: "roleChanged",
+      roomId: room.id,
+      userId: targetUserId,
+      role: parsed.data.role,
+    });
+
     res.status(200).json({ userId: targetUserId, role: updated.role });
   },
 );
@@ -309,8 +318,14 @@ roomRouter.delete(
       return;
     }
 
-    // Same caveat as a demotion: an established socket keeps working until it
-    // reconnects. Their next `join` will be refused.
+    // Close their live sockets on this board. Best-effort — their next `join`
+    // would be refused regardless, which is where the real guarantee lives.
+    notifyEviction({
+      action: "removed",
+      roomId: room.id,
+      userId: targetUserId,
+    });
+
     res.status(200).json({ ok: true, userId: targetUserId });
   },
 );

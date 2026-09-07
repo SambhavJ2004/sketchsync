@@ -7,6 +7,7 @@ import { authenticateUpgrade } from "./auth.js";
 import { RoomRegistry, type Conn } from "./registry.js";
 import { handleLeave, handleMessage } from "./messages.js";
 import { createRateLimitState } from "./rateLimit.js";
+import { handleInternalEvict } from "./internal.js";
 
 /**
  * Hard frame-size ceiling. `ws` enforces this itself: an oversized frame is
@@ -29,6 +30,27 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     res.end(JSON.stringify({ ok: true, connections: connections.size }));
     return;
   }
+
+  // The ONE endpoint apps/api calls on this service. See internal.ts for why
+  // that coupling exists and why it is deliberately best-effort rather than a
+  // security boundary.
+  if (req.method === "POST" && req.url === "/internal/evict") {
+    void handleInternalEvict(req, res, {
+      registry,
+      secret: env.INTERNAL_SECRET,
+    }).catch((err: unknown) => {
+      console.error(
+        "internal evict error:",
+        err instanceof Error ? err.message : err,
+      );
+      if (!res.headersSent) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ message: "Internal error" }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(404, { "content-type": "application/json" });
   res.end(JSON.stringify({ message: "Not found" }));
 });

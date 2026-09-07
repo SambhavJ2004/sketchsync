@@ -43,6 +43,8 @@
         "REALTIME_PORT",
         "WEB_ORIGIN",
         "API_ORIGIN",
+        "INTERNAL_SECRET",
+        "REALTIME_INTERNAL_URL",
         "NODE_ENV"
       ]
     },
@@ -72,6 +74,8 @@
         "REALTIME_PORT",
         "WEB_ORIGIN",
         "API_ORIGIN",
+        "INTERNAL_SECRET",
+        "REALTIME_INTERNAL_URL",
         "NODE_ENV"
       ]
     },
@@ -97,6 +101,8 @@
         "NEXT_PUBLIC_REALTIME_URL",
         "NEXT_PUBLIC_E2E",
         "E2E_WEB_ORIGIN",
+        "INTERNAL_SECRET",
+        "REALTIME_INTERNAL_URL",
         "NODE_ENV"
       ]
     },

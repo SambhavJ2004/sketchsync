@@ -172,8 +172,64 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
   tests) but the browser path does not. That belongs with the client work, since the screens
   it would drive do not exist yet.
 
+  **Step 2 of 4 done: instant eviction.** Backend only, no client changes.
+
+  Removing or demoting a member used to change the database and nothing else —
+  `conn.role` is snapshotted at `join`, so the user kept drawing, and every stroke
+  persisted, until they happened to reconnect. `POST /internal/evict` on the realtime
+  gateway closes that window.
+
+  - **THIS BREAKS THE "api AND realtime NEVER TALK" PROPERTY.** That was a genuinely good
+    property — either service could restart or scale without the other noticing, and their
+    only synchronisation point was a Postgres row. It is given up for one reason: only the
+    process holding the sockets can act on them. The trade-off is documented at the top of
+    `packages/shared/src/internal.ts` and `apps/api/src/rooms/evict.ts`, i.e. at both ends of
+    the call, where someone changing either side will see it.
+  - **IT IS NOT THE SECURITY BOUNDARY, and the code says so in both files.** `handleJoin`
+    still re-reads membership from the database on every join, so a removed user cannot
+    reconnect. Eviction only shortens the gap between "removed in the database" and "their
+    live socket notices". It **fails open by design** — if it never fires, the system is
+    exactly as correct as before, just slower to react.
+  - **Best-effort, structurally:** 2 s timeout, nothing branches on the result, every failure
+    (timeout, refused connection, 403 secret mismatch, 500, sleeping free-tier service) is
+    logged and swallowed. A removal that succeeded in the database must never report failure
+    because a notification did not land.
+  - **Removed** → sockets for that user *in that room* close with code **4403** ("removed
+    from board"). Per-room on purpose: losing one board must not disconnect the user's other
+    boards. **Demoted** → `conn.role` is rewritten in place, so the next mutation is refused
+    by the same `canWrite` check that has always guarded writes — no second enforcement path.
+  - **The demotion notice reuses the existing `error` frame rather than adding a message
+    type.** "No new WS message types" is doing real work here: the client validates inbound
+    frames against the `ServerMessage` union and *silently drops* unknown ones, so a new type
+    would be invisible until the client shipped support for it. `error` already surfaces as a
+    toast. A richer signal (live read-only toolbar) is client work.
+  - **Config:** `INTERNAL_SECRET` (shared, both services) and `REALTIME_INTERNAL_URL` (api
+    only — a second variable was unavoidable; the API has to know where to send the call).
+    Optional locally, **required in production** via a `superRefine` on NODE_ENV. Added to
+    `packages/config`, `render.yaml` (`sync: false` on both services), `docker-compose.yml`,
+    both `.env.example` files, `turbo.json` (dev/test/test:e2e) and `ci.yml`.
+  - **Fails closed with no secret configured:** the endpoint refuses everything rather than
+    falling open, and the API skips calling. Every refusal is the same bare
+    `403 {"message":"Forbidden"}` — no signal about whether the room or user exists.
+
+  **Tests 181 → 205** (realtime 96 → 114, api 37 → 43): bad/missing/array/prefix secret all
+  refused and the no-secret case fails closed; a removed user's sockets in that room close
+  while their sockets in other rooms and other users' sockets are untouched; a demotion
+  rewrites the role without closing and emits the `error` frame; an unreachable gateway
+  resolves `false` instead of throwing.
+
+  Also verified against the **running service**, since the unit tests exercise the pure
+  functions and not the HTTP glue where a header-name mistake would hide: no header → 403,
+  wrong secret → 403, correct secret → `{"closed":0,"updated":0}`, malformed body → 400,
+  `GET` → 404.
+
+  **Gate: green.** typecheck, lint, build, 205 unit tests, e2e 27/27 in 3.2 min.
+  (`db:typecheck` hit the documented Windows `EPERM … query_engine` first — a dev server I
+  had started was still holding the DLL. Stopping stray node processes cleared it.)
+
   **Still to do:** 3b client (403 screen, `/invite/[token]` route, owner panel), 3c wiring,
-  and e2e coverage for the access paths themselves.
+  and e2e coverage for the access paths themselves — including eviction, which currently has
+  no browser-level test.
 
 - **Phase 5 — in progress.** `README.md` written at the repo root: description, live link,
   stack + CI badge, the architecture diagram reused from `ARCHITECTURE.md`, a three-part

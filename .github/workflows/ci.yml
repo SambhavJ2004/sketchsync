@@ -94,6 +94,14 @@ jobs:
 
       E2E_WEB_ORIGIN: http://localhost:3000
 
+      # Shared secret for the api -> realtime eviction call. In plain sight for
+      # the same reason JWT_SECRET is: it guards a throwaway pair of services
+      # that live for one job. Set on both because packages/config requires a
+      # match, and because the eviction tests assert a WRONG secret is refused —
+      # which needs a RIGHT one to exist.
+      INTERNAL_SECRET: sketchsync-ci-internal-not-a-real-secret-0123456789
+      REALTIME_INTERNAL_URL: http://localhost:3002
+
     steps:
       - uses: actions/checkout@v4
 

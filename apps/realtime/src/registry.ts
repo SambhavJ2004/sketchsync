@@ -67,6 +67,71 @@ export class RoomRegistry {
     return [...byUser.values()];
   }
 
+  /**
+   * Close every socket a user holds IN ONE ROOM.
+   *
+   * Scoped to the room on purpose: a user removed from board A must keep their
+   * sockets on boards B and C. Multi-tab is handled naturally — each tab is its
+   * own Conn, and all of that user's tabs on this board close.
+   *
+   * `leave()` is not called here; the socket's own `close` handler runs
+   * `handleLeave`, which removes it from the room and re-broadcasts presence.
+   * Doing it twice would emit a redundant presence frame.
+   *
+   * @returns how many sockets were closed.
+   */
+  closeUserSockets(
+    roomId: string,
+    userId: string,
+    code: number,
+    reason: string,
+  ): number {
+    const set = this.rooms.get(roomId);
+    if (!set) return 0;
+    // Snapshot first: closing mutates the set through the close handler.
+    const targets = [...set].filter((conn) => conn.userId === userId);
+    let closed = 0;
+    for (const conn of targets) {
+      try {
+        conn.ws.close(code, reason);
+        closed += 1;
+      } catch {
+        // A socket already tearing down is not a failure — the outcome we
+        // wanted (it stops receiving) is the outcome we have.
+      }
+    }
+    return closed;
+  }
+
+  /**
+   * Rewrite a user's role on their LIVE connections in one room.
+   *
+   * This is what makes a demotion take effect without a reconnect: `canWrite`
+   * in messages.ts reads `conn.role` on every mutation, so updating it in place
+   * means the very next write is refused by the check that has always guarded
+   * writes. No second enforcement path to keep in sync.
+   *
+   * @returns how many connections were updated.
+   */
+  setUserRole(roomId: string, userId: string, role: Role): number {
+    const set = this.rooms.get(roomId);
+    if (!set) return 0;
+    let updated = 0;
+    for (const conn of set) {
+      if (conn.userId !== userId) continue;
+      conn.role = role;
+      updated += 1;
+    }
+    return updated;
+  }
+
+  /** Every live socket a user holds in one room. */
+  connectionsFor(roomId: string, userId: string): Conn[] {
+    const set = this.rooms.get(roomId);
+    if (!set) return [];
+    return [...set].filter((conn) => conn.userId === userId);
+  }
+
   /** Send a message to everyone in the room except `exclude`. */
   broadcast(roomId: string, message: ServerMessage, exclude?: Conn): void {
     const set = this.rooms.get(roomId);

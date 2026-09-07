@@ -6,3 +6,6 @@ export * from "./auth.js";
 export * from "./room.js";
 export * from "./element.js";
 export * from "./ws.js";
+// Service-to-service (api -> realtime). Server-only in practice, but a
+// cross-app contract, so it lives here with the others.
+export * from "./internal.js";
