@@ -29,7 +29,11 @@ test.describe.configure({ mode: "serial" });
 test.beforeAll(async () => {
   owner = await createUser("def-owner");
   editor = await createUser("def-editor");
-  room = await createRoom(owner, "Deferrals board");
+  // LINK, not the PRIVATE default: this file needs a second user in the board
+  // but is not testing how they got there. Leaving it PRIVATE would make every
+  // test here fail on invite plumbing that has nothing to do with what they
+  // assert. Access acquisition itself is covered against PRIVATE boards.
+  room = await createRoom(owner, "Deferrals board", { visibility: "LINK" });
   await joinRoom(editor, room.slug);
 });
 

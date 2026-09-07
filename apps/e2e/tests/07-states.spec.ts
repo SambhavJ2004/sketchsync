@@ -40,8 +40,11 @@ test.beforeAll(async () => {
   owner = await createUser("st-owner");
   viewer = await createUser("st-viewer");
   room = await createRoom(owner, "States board");
-  // VIEWER cannot be produced through HTTP — the only join route is the open
-  // share link, which always grants EDITOR.
+  // An HTTP route CAN grant VIEWER now: `POST /invites/:token/accept` redeems an
+  // invite at whatever role it was minted for. Writing the row directly is still
+  // the right call here — this file asserts what a VIEWER SEES, so minting and
+  // redeeming an invite would add two round trips of setup that no assertion
+  // below depends on. The room also stays PRIVATE, as production creates it.
   await addMember(viewer, room, "VIEWER");
   await seedElements(room, owner, [{ kind: "rect", x: 400, y: 400, w: 60, h: 50 }]);
 });

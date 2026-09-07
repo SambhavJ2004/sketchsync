@@ -87,7 +87,93 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
   Gate after these changes: typecheck, lint, build, unit tests all green;
   **e2e 27 passed in 3.5 minutes** against the local containerized Postgres.
 
-- **Phase 3 — still deliberately deferred.** Private boards and invites. See below.
+- **Phase 3 — in progress. Step 1 of 4 done: database and backend.** No client changes and
+  no socket eviction yet; those are later steps.
+
+  **Schema + migration `20260907120000_room_visibility_and_invites`:**
+  - `RoomVisibility` enum (`PRIVATE` | `LINK`), `Room.visibility` defaulting to **PRIVATE**.
+  - `Invite` model — id, roomId, tokenHash, role, createdBy, expiresAt, maxUses, usedCount,
+    revokedAt, createdAt; unique index on `tokenHash`, indexes on `roomId` and `expiresAt`;
+    room FK cascades, creator FK restricts.
+  - **BACKFILL: every existing room is set to `PRIVATE`, and that is safe ONLY because the
+    database was empty.** Production was wiped before Phase 3 started, so there were zero
+    `Room` rows and no share link could break. Against a populated database the correct
+    backfill would have been the opposite — `LINK`, preserving access people were already
+    relying on, since a migration should not silently change the meaning of existing data.
+    With no rows to preserve, that reasoning has no subject, and backfilling to `LINK` would
+    have shipped a "private boards" migration whose every row said public. The reasoning is
+    recorded in the migration itself so the line is not copied into a later migration by
+    pattern-matching.
+  - Verified on a clean apply, not just in the file: the local database was dropped
+    (`down -v`) and all 7 migrations re-applied from empty. Column default reads
+    `'PRIVATE'::"RoomVisibility"`, and a freshly inserted room comes out `PRIVATE`.
+    Note `prisma migrate deploy` does **not** checksum already-applied migrations — editing
+    an applied migration reports "No pending migrations" and silently leaves the old SQL in
+    place, so a reset was the only way to actually exercise the change.
+
+  **Invite tokens** (`apps/api/src/rooms/invites.ts`) reuse the `auth/ticket.ts` pattern:
+  32 random bytes, only the SHA-256 stored, raw token returned once. Redemption is a single
+  atomic `UPDATE ... WHERE revokedAt IS NULL AND expiresAt > NOW() AND usedCount < maxUses
+  RETURNING`, so a use is claimed and checked in one statement. One deliberate divergence
+  from tickets: an invite is consumed by INCREMENT, not DELETE, because it carries a use
+  budget and an audit trail.
+
+  **Routes:** `POST/GET /rooms/:slug/invites` and `DELETE /rooms/:slug/invites/:id` (OWNER),
+  `POST /invites/:token/accept` (any signed-in user, mounted at the top level since the
+  caller is not yet a member), `GET /rooms/:slug/members` (any member),
+  `PATCH`/`DELETE /rooms/:slug/members/:userId` (OWNER), `PATCH /rooms/:slug` extended to
+  take `visibility`, and **`POST /rooms/:slug/join` now 403s unless visibility is LINK**.
+  The 403 body carries `visibility` so the client can later tell "join this board?" from
+  "you don't have access" — that is what step 3c needs.
+
+  **An owner cannot remove or demote themselves.** Extracted as a pure function
+  (`rooms/ownerGuard.ts`) because it guards two routes and is the kind of rule that gets
+  dropped in a rewrite. It refuses two targets: yourself, and the room's `ownerId` — the
+  second because OWNER is a rank and a second OWNER-ranked member could otherwise strand
+  the board. Invites and role changes are also capped at EDITOR/VIEWER, so OWNER is not
+  mintable at all.
+
+  **Tests: 150 → 181.** `ownerGuard.test.ts` (17, pure) covers the authorization rules and
+  the shared Zod bounds, including a drift guard pinning the hand-written `MemberRole` /
+  `RoomVisibility` enums against Prisma's. `invites.test.ts` (14) covers redemption.
+  - **`pnpm test` now requires a database** for the first time. Atomicity is a property of
+    a SQL statement, and a mock would only prove the mock agrees with the implementation.
+    Run `docker compose -f docker-compose.dev.yml up -d` first; CI already provisions
+    Postgres and migrates before the unit-test step. The suite **fails rather than skips**
+    when `DATABASE_URL` is absent.
+  - The atomicity test was checked for teeth against a deliberately naive
+    read-check-update implementation: **naive → 2 winners, `usedCount` 2** on a single-use
+    invite; **atomic → 1 and 1**.
+
+  **Gate: FULLY GREEN.** typecheck, lint, build, 181 unit tests, **e2e 27/27 in 1.6 min.**
+
+  The 6 e2e failures this step first produced were all one root cause — `joinRoom()` getting
+  a 403 now that rooms default to PRIVATE — and were repaired as a **fixture** change, not a
+  product change:
+  - `createRoom(user, name, { visibility })` gained an explicit option, **defaulting to
+    PRIVATE** so the fixture keeps matching production. `"LINK"` is reached over the real
+    owner-only `PATCH /rooms/:slug`, not by writing the column, so the fixture opens a board
+    the same way a user would.
+  - Five rooms opt into LINK — the open-gap timing tests, drawing propagation, the two
+    resilience boards, and the deferrals board. **None of those is testing access**; they
+    need a second user present and should not care how they got there.
+    **Six of eleven `createRoom` calls stay PRIVATE**, including all of `07-states`,
+    `02-transport` and `05-export`. Audited: the LINK opt-ins exactly match the `joinRoom`
+    calls, file by file.
+  - `joinRoom()` now says so in its 403 message ("is the room LINK?"), because the next
+    person to hit this will otherwise read it as an auth failure.
+  - The stale comment in `07-states.spec.ts` is corrected: an HTTP route **can** grant VIEWER
+    now. `addMember()` stays as the mechanism there — that file asserts what a VIEWER *sees*,
+    so minting and redeeming an invite would be two round trips no assertion depends on.
+
+  **Coverage gap, deliberate and not yet closed:** nothing in the e2e suite exercises private
+  boards or invites end to end — no spec redeems an invite, hits a PRIVATE board as a
+  stranger, or checks the 403 body carries `visibility`. The backend has unit coverage (31
+  tests) but the browser path does not. That belongs with the client work, since the screens
+  it would drive do not exist yet.
+
+  **Still to do:** 3b client (403 screen, `/invite/[token]` route, owner panel), 3c wiring,
+  and e2e coverage for the access paths themselves.
 
 - **Phase 5 — in progress.** `README.md` written at the repo root: description, live link,
   stack + CI badge, the architecture diagram reused from `ARCHITECTURE.md`, a three-part

@@ -1,10 +1,20 @@
 import { Router } from "express";
-import { CreateRoomInput, RenameRoomInput } from "@sketchsync/shared";
+import {
+  CreateInviteInput,
+  CreateRoomInput,
+  UpdateMemberRoleInput,
+  UpdateRoomInput,
+} from "@sketchsync/shared";
 import { Role, prismaClient, type Room } from "@sketchsync/db";
 import { requireAuth } from "../middleware/requireAuth.js";
 import { formatZodError } from "../lib/validation.js";
+import { env } from "../env.js";
 import { createRoomWithOwner } from "./service.js";
 import { requireMembership } from "./membership.js";
+import { acceptInvite, issueInvite, toInviteView } from "./invites.js";
+// The no-owner-left-behind rule. Extracted and pure so it is unit-tested
+// directly rather than only through the two routes that call it.
+import { refuseIfOwnerTarget } from "./ownerGuard.js";
 
 export const roomRouter: Router = Router();
 
@@ -18,9 +28,14 @@ function membershipView(room: Room, role: Role) {
     slug: room.slug,
     name: room.name,
     ownerId: room.ownerId,
+    visibility: room.visibility,
     role,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Rooms
+// ---------------------------------------------------------------------------
 
 // POST /rooms — create a room; caller becomes OWNER.
 roomRouter.post("/", async (req, res) => {
@@ -36,6 +51,8 @@ roomRouter.post("/", async (req, res) => {
     return;
   }
 
+  // Visibility is not settable at creation: a new board is PRIVATE (the schema
+  // default) and opening it up is a separate, deliberate PATCH.
   const room = await createRoomWithOwner(userId, parsed.data.name);
   res.status(201).json(membershipView(room, Role.OWNER));
 });
@@ -52,7 +69,9 @@ roomRouter.get("/", async (req, res) => {
     where: { userId },
     select: {
       role: true,
-      room: { select: { id: true, slug: true, name: true, ownerId: true } },
+      room: {
+        select: { id: true, slug: true, name: true, ownerId: true, visibility: true },
+      },
     },
     orderBy: { room: { createdAt: "desc" } },
   });
@@ -63,12 +82,17 @@ roomRouter.get("/", async (req, res) => {
       slug: m.room.slug,
       name: m.room.name,
       ownerId: m.room.ownerId,
+      visibility: m.room.visibility,
       role: m.role,
     })),
   );
 });
 
-// POST /rooms/:slug/join — open-collaboration join as EDITOR (idempotent).
+// POST /rooms/:slug/join — join a LINK board. PRIVATE boards refuse.
+//
+// This route used to be the entire access model, and it always granted EDITOR:
+// possession of a slug was possession of edit rights. It is now gated on the
+// room opting in to that behaviour.
 roomRouter.post("/:slug/join", async (req, res) => {
   const userId = req.userId;
   if (!userId) {
@@ -88,6 +112,17 @@ roomRouter.post("/:slug/join", async (req, res) => {
     return;
   }
 
+  // THE PHASE 3 GATE. A private board cannot be joined by asking; it needs an
+  // invite. Answered as 403 with the visibility, matching requireMembership, so
+  // the client renders "you don't have access" rather than a join prompt.
+  if (room.visibility !== "LINK") {
+    res.status(403).json({
+      message: "This board is private. You need an invite to join.",
+      visibility: room.visibility,
+    });
+    return;
+  }
+
   // Upsert makes this idempotent and race-safe: existing members keep their
   // current role; new members are added as EDITOR. Either way -> 200.
   const membership = await prismaClient.roomMember.upsert({
@@ -100,16 +135,18 @@ roomRouter.post("/:slug/join", async (req, res) => {
   res.status(200).json(membershipView(room, membership.role));
 });
 
-// PATCH /rooms/:slug — rename. OWNER ONLY.
+// PATCH /rooms/:slug — rename and/or change visibility. OWNER ONLY.
 //
-// Editors join through a share link and are effectively guests; letting a guest
-// rename someone else's board is a surprise the owner cannot undo without
-// noticing. Read/draw access does not imply the right to relabel the thing.
+// Editors arrive through an invite or a share link and are effectively guests;
+// read/draw access does not imply the right to relabel someone else's board, and
+// certainly not to open it to the internet.
 //
-// NOTE: a rename does NOT propagate to clients already in the board — the WS
-// protocol has no room-metadata message and adding one would violate the
-// no-new-message-types rule. The divergence is a stale title in the board
-// chrome only; it self-corrects on reload or on navigating back via /rooms.
+// NOTE: neither change propagates to clients already in the board — the WS
+// protocol has no room-metadata message and adding one would break the
+// no-new-message-types rule. For a rename that is a stale title. For visibility
+// it is more subtle: flipping LINK -> PRIVATE does not evict anyone who is
+// already a member, because it governs who may JOIN, not who already has. That
+// is the intended meaning, not a gap.
 roomRouter.patch("/:slug", requireMembership(Role.OWNER), async (req, res) => {
   const room = req.room;
   const role = req.roomRole;
@@ -118,7 +155,7 @@ roomRouter.patch("/:slug", requireMembership(Role.OWNER), async (req, res) => {
     return;
   }
 
-  const parsed = RenameRoomInput.safeParse(req.body);
+  const parsed = UpdateRoomInput.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json(formatZodError(parsed.error));
     return;
@@ -126,7 +163,12 @@ roomRouter.patch("/:slug", requireMembership(Role.OWNER), async (req, res) => {
 
   const updated = await prismaClient.room.update({
     where: { id: room.id },
-    data: { name: parsed.data.name },
+    data: {
+      ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
+      ...(parsed.data.visibility !== undefined
+        ? { visibility: parsed.data.visibility }
+        : {}),
+    },
   });
   res.status(200).json(membershipView(updated, role));
 });
@@ -145,4 +187,290 @@ roomRouter.get("/:slug", requireMembership(), async (req, res) => {
   });
 
   res.status(200).json({ ...membershipView(room, role), memberCount });
+});
+
+// ---------------------------------------------------------------------------
+// Members
+// ---------------------------------------------------------------------------
+
+// GET /rooms/:slug/members — any member may see who else is in the board.
+//
+// Deliberately readable by VIEWERs: you can already see everyone's cursor and
+// presence avatar in the canvas, so the membership list discloses nothing new,
+// and hiding it would make the collaborator list inconsistent with the board.
+roomRouter.get("/:slug/members", requireMembership(), async (req, res) => {
+  const room = req.room;
+  if (!room) {
+    res.status(500).json({ message: "Membership context missing" });
+    return;
+  }
+
+  const members = await prismaClient.roomMember.findMany({
+    where: { roomId: room.id },
+    select: {
+      role: true,
+      user: { select: { id: true, name: true, email: true, avatarUrl: true } },
+    },
+    orderBy: { user: { name: "asc" } },
+  });
+
+  res.status(200).json(
+    members.map((m) => ({
+      userId: m.user.id,
+      name: m.user.name,
+      email: m.user.email,
+      avatarUrl: m.user.avatarUrl,
+      role: m.role,
+      isOwner: m.user.id === room.ownerId,
+    })),
+  );
+});
+
+// PATCH /rooms/:slug/members/:userId — change a member's role. OWNER ONLY.
+roomRouter.patch(
+  "/:slug/members/:userId",
+  requireMembership(Role.OWNER),
+  async (req, res) => {
+    const room = req.room;
+    const callerId = req.userId;
+    const targetUserId = req.params.userId;
+    if (!room || !callerId) {
+      res.status(500).json({ message: "Membership context missing" });
+      return;
+    }
+    if (!targetUserId) {
+      res.status(400).json({ message: "Missing user id" });
+      return;
+    }
+
+    const parsed = UpdateMemberRoleInput.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json(formatZodError(parsed.error));
+      return;
+    }
+
+    const refusal = refuseIfOwnerTarget(room, callerId, targetUserId, "change the role of");
+    if (refusal) {
+      res.status(403).json({ message: refusal });
+      return;
+    }
+
+    const existing = await prismaClient.roomMember.findUnique({
+      where: { roomId_userId: { roomId: room.id, userId: targetUserId } },
+      select: { id: true },
+    });
+    if (!existing) {
+      res.status(404).json({ message: "That user is not a member of this board" });
+      return;
+    }
+
+    const updated = await prismaClient.roomMember.update({
+      where: { roomId_userId: { roomId: room.id, userId: targetUserId } },
+      data: { role: parsed.data.role },
+      select: { role: true },
+    });
+
+    // A demotion does NOT take effect on a live socket: apps/realtime snapshots
+    // conn.role at `join` and the two services never talk to each other. The
+    // change applies on their next connect. Accepted and documented (Phase 3
+    // design, option (a)); an eviction hook is step 3-later, not this one.
+    res.status(200).json({ userId: targetUserId, role: updated.role });
+  },
+);
+
+// DELETE /rooms/:slug/members/:userId — remove a member. OWNER ONLY.
+roomRouter.delete(
+  "/:slug/members/:userId",
+  requireMembership(Role.OWNER),
+  async (req, res) => {
+    const room = req.room;
+    const callerId = req.userId;
+    const targetUserId = req.params.userId;
+    if (!room || !callerId) {
+      res.status(500).json({ message: "Membership context missing" });
+      return;
+    }
+    if (!targetUserId) {
+      res.status(400).json({ message: "Missing user id" });
+      return;
+    }
+
+    const refusal = refuseIfOwnerTarget(room, callerId, targetUserId, "remove");
+    if (refusal) {
+      res.status(403).json({ message: refusal });
+      return;
+    }
+
+    const deleted = await prismaClient.roomMember.deleteMany({
+      where: { roomId: room.id, userId: targetUserId },
+    });
+    if (deleted.count === 0) {
+      res.status(404).json({ message: "That user is not a member of this board" });
+      return;
+    }
+
+    // Same caveat as a demotion: an established socket keeps working until it
+    // reconnects. Their next `join` will be refused.
+    res.status(200).json({ ok: true, userId: targetUserId });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Invites
+// ---------------------------------------------------------------------------
+
+// POST /rooms/:slug/invites — mint an invite. OWNER ONLY.
+//
+// Returns the RAW TOKEN EXACTLY ONCE. It is not recoverable afterwards: only its
+// SHA-256 is stored, so re-showing it is impossible by construction rather than
+// by policy.
+roomRouter.post("/:slug/invites", requireMembership(Role.OWNER), async (req, res) => {
+  const room = req.room;
+  const userId = req.userId;
+  if (!room || !userId) {
+    res.status(500).json({ message: "Membership context missing" });
+    return;
+  }
+
+  const parsed = CreateInviteInput.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json(formatZodError(parsed.error));
+    return;
+  }
+
+  const { invite, token } = await issueInvite({
+    roomId: room.id,
+    createdBy: userId,
+    // Zod has already narrowed this to EDITOR | VIEWER; OWNER invites are not
+    // mintable (see InviteRole in @sketchsync/shared).
+    role: parsed.data.role as Role,
+    expiresInHours: parsed.data.expiresInHours,
+    maxUses: parsed.data.maxUses,
+  });
+
+  // WEB_ORIGIN is a list; the first entry is the canonical public origin, and
+  // the rest are additional allowed origins (preview domains and the like). An
+  // invite link has to name exactly one host, so it uses the canonical one.
+  const acceptUrl = `${env.WEB_ORIGIN[0]}/invite/${token}`;
+
+  res.status(201).json({
+    ...toInviteView(invite),
+    token,
+    acceptUrl,
+  });
+});
+
+// GET /rooms/:slug/invites — list invites. OWNER ONLY. METADATA ONLY.
+//
+// `toInviteView` cannot leak a token: the raw value was never stored and the
+// hash is not part of the view type.
+roomRouter.get("/:slug/invites", requireMembership(Role.OWNER), async (req, res) => {
+  const room = req.room;
+  if (!room) {
+    res.status(500).json({ message: "Membership context missing" });
+    return;
+  }
+
+  const invites = await prismaClient.invite.findMany({
+    where: { roomId: room.id },
+    orderBy: { createdAt: "desc" },
+  });
+
+  res.status(200).json(invites.map(toInviteView));
+});
+
+// DELETE /rooms/:slug/invites/:id — revoke. OWNER ONLY.
+//
+// Sets `revokedAt` rather than deleting the row: the atomic redemption gate
+// tests `revokedAt IS NULL`, and keeping the row preserves the audit trail —
+// "this link was revoked" is a more useful answer than "no such link".
+roomRouter.delete(
+  "/:slug/invites/:id",
+  requireMembership(Role.OWNER),
+  async (req, res) => {
+    const room = req.room;
+    const inviteId = req.params.id;
+    if (!room) {
+      res.status(500).json({ message: "Membership context missing" });
+      return;
+    }
+    if (!inviteId) {
+      res.status(400).json({ message: "Missing invite id" });
+      return;
+    }
+
+    // Scoped by roomId as well as id, so an owner of board A cannot revoke an
+    // invite belonging to board B by guessing its id.
+    const revoked = await prismaClient.invite.updateMany({
+      where: { id: inviteId, roomId: room.id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    if (revoked.count === 0) {
+      // Either no such invite in this room, or it was already revoked. Both are
+      // "nothing further to do" from the caller's point of view, but 404 would
+      // be misleading for an already-revoked invite, so distinguish them.
+      const exists = await prismaClient.invite.findFirst({
+        where: { id: inviteId, roomId: room.id },
+        select: { id: true },
+      });
+      if (!exists) {
+        res.status(404).json({ message: "Invite not found" });
+        return;
+      }
+      res.status(200).json({ ok: true, alreadyRevoked: true });
+      return;
+    }
+
+    res.status(200).json({ ok: true, alreadyRevoked: false });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Invite acceptance (mounted at /invites, not under a room)
+// ---------------------------------------------------------------------------
+// Separate router because the caller is by definition NOT yet a member, so none
+// of the room middleware applies — the token itself is the authorization.
+
+export const inviteRouter: Router = Router();
+inviteRouter.use(requireAuth);
+
+/** Redemption failures, mapped to a status and a message a user can act on. */
+const REDEEM_FAILURES = {
+  not_found: { status: 404, message: "This invite link is not valid." },
+  revoked: { status: 410, message: "This invite link has been revoked." },
+  expired: { status: 410, message: "This invite link has expired." },
+  exhausted: { status: 410, message: "This invite link has already been used." },
+} as const;
+
+// POST /invites/:token/accept — redeem an invite and join the room.
+inviteRouter.post("/:token/accept", async (req, res) => {
+  const userId = req.userId;
+  if (!userId) {
+    res.status(401).json({ message: "Not authenticated" });
+    return;
+  }
+
+  const token = req.params.token;
+  if (!token) {
+    res.status(400).json({ message: "Missing invite token" });
+    return;
+  }
+
+  const result = await acceptInvite(token, userId);
+  if (!result.ok) {
+    const { status, message } = REDEEM_FAILURES[result.reason];
+    res.status(status).json({ message });
+    return;
+  }
+
+  const room = await prismaClient.room.findUnique({ where: { id: result.roomId } });
+  if (!room) {
+    // The room was deleted between redemption and this read. The use is spent;
+    // that is the safe direction (see acceptInvite).
+    res.status(404).json({ message: "That board no longer exists." });
+    return;
+  }
+
+  res.status(200).json(membershipView(room, result.role));
 });

@@ -46,32 +46,84 @@ export async function createUser(label = "user"): Promise<SeededUser> {
   return { email, password: PASSWORD, userId: user.id, cookieValue };
 }
 
-export async function createRoom(user: SeededUser, name = "e2e board"): Promise<SeededRoom> {
+export interface CreateRoomOptions {
+  /**
+   * Defaults to PRIVATE, matching production: `POST /rooms` has no visibility
+   * field and the column defaults to PRIVATE.
+   *
+   * Pass `"LINK"` when a test needs a second user in the board but is not
+   * testing how they got there — the open-gap timing tests, drawing
+   * propagation, resilience, the colour-drag undo test. Those want `joinRoom()`
+   * to work without the test having to care about membership at all.
+   *
+   * Do NOT reach for this in a test that is genuinely about ACCESS. "Can a
+   * stranger get in?" must run against a PRIVATE board, or it asserts nothing.
+   */
+  visibility?: "PRIVATE" | "LINK";
+}
+
+export async function createRoom(
+  user: SeededUser,
+  name = "e2e board",
+  opts: CreateRoomOptions = {},
+): Promise<SeededRoom> {
   const res = await fetch(`${WEB_ORIGIN}/api/rooms`, {
     method: "POST",
     headers: { "content-type": "application/json", cookie: user.cookieValue },
     body: JSON.stringify({ name }),
   });
   if (!res.ok) throw new Error(`create room failed: ${res.status}`);
-  return (await res.json()) as SeededRoom;
+  const room = (await res.json()) as SeededRoom;
+
+  // Opening a board up is a separate, deliberate act — visibility is not
+  // settable at creation. Done over the real owner-only PATCH rather than by
+  // writing the column, so the fixture reaches LINK the same way a user would.
+  if (opts.visibility === "LINK") {
+    const patch = await fetch(`${WEB_ORIGIN}/api/rooms/${room.slug}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", cookie: user.cookieValue },
+      body: JSON.stringify({ visibility: "LINK" }),
+    });
+    if (!patch.ok) {
+      throw new Error(`set visibility=LINK failed: ${patch.status}`);
+    }
+  }
+
+  return room;
 }
 
-/** Add `user` to `room` as EDITOR (idempotent), the same way a share link does. */
+/**
+ * Add `user` to `room` as EDITOR (idempotent), the same way a share link does.
+ *
+ * ONLY WORKS ON A `LINK` BOARD. Since private boards landed, `POST
+ * /rooms/:slug/join` 403s unless the room opted in, so callers must create the
+ * room with `{ visibility: "LINK" }`. A 403 here means the room was left
+ * PRIVATE, not that auth broke.
+ */
 export async function joinRoom(user: SeededUser, slug: string): Promise<void> {
   const res = await fetch(`${WEB_ORIGIN}/api/rooms/${slug}/join`, {
     method: "POST",
     headers: { cookie: user.cookieValue },
   });
-  if (!res.ok) throw new Error(`join failed: ${res.status}`);
+  if (!res.ok) {
+    throw new Error(
+      `join failed: ${res.status}` +
+        (res.status === 403
+          ? " — is the room LINK? createRoom(..., { visibility: \"LINK\" })"
+          : ""),
+    );
+  }
 }
 
 /**
  * Add a member with an explicit role, straight to the database.
  *
- * There is no HTTP route that grants VIEWER — the only join path is the open
- * share link, which always grants EDITOR (see the note on the 403/join
- * conflation in CLAUDE.md). Writing the row directly is the only way to
- * construct a VIEWER, and it produces exactly the row the API would.
+ * An HTTP route CAN now grant VIEWER — `POST /invites/:token/accept` redeems an
+ * invite at whatever role it was minted for. This helper stays because it is
+ * still the cheapest way to put a user in a board at a chosen role: no invite to
+ * mint, no token to carry, and the row it writes is exactly the row the API
+ * would produce. Use the invite route when the test is about ACQUIRING access;
+ * use this when a test merely needs a VIEWER to already exist.
  */
 export async function addMember(
   user: SeededUser,

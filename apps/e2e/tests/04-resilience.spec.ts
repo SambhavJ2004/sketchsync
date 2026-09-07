@@ -33,7 +33,11 @@ let room: SeededRoom;
 test.beforeAll(async () => {
   owner = await createUser("res-a");
   peer = await createUser("res-b");
-  room = await createRoom(owner, "resilience board");
+  // LINK, not the PRIVATE default: this file needs a second user in the board
+  // but is not testing how they got there. Leaving it PRIVATE would make every
+  // test here fail on invite plumbing that has nothing to do with what they
+  // assert. Access acquisition itself is covered against PRIVATE boards.
+  room = await createRoom(owner, "resilience board", { visibility: "LINK" });
   await joinRoom(peer, room.slug);
 });
 test.afterAll(async () => {
@@ -144,7 +148,9 @@ test("DEFERRAL PINNED: mutations made while disconnected are NOT flushed on reco
   // Its OWN room. Other tests in this file also draw while disconnected, and
   // whether those land is timing-dependent — sharing a room would import that
   // nondeterminism into an assertion about something NOT arriving.
-  const solo = await createRoom(owner, "deferral board");
+  // LINK for the same reason as the shared room above: the peer just needs to be
+  // in the board, and this test is about a mutation NOT arriving.
+  const solo = await createRoom(owner, "deferral board", { visibility: "LINK" });
   await joinRoom(peer, solo.slug);
   const ctxA = await contextFor(browser, owner);
   const ctxB = await contextFor(browser, peer);

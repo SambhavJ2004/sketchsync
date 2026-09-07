@@ -2,7 +2,7 @@
 // Phase 0: models only — no seeding, no application logic.
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
   // "native" keeps host development working (Windows here, macOS/Linux for
   // anyone else); "debian-openssl-3.0.x" is the engine the container needs,
   // since the runtime image is node:22-bookworm-slim.
@@ -15,11 +15,11 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider  = "postgresql"
   // Runtime connection. In production this is Neon's POOLED host
   // (`-pooler` in the hostname, `?pgbouncer=true`), which survives many
   // short-lived serverless connections.
-  url      = env("DATABASE_URL")
+  url       = env("DATABASE_URL")
   // Migrations and introspection only. A transaction-mode pooler (PgBouncer /
   // Supavisor) breaks DDL and the advisory locks `migrate deploy` takes, so
   // Prisma needs a DIRECT, non-pooled host for those.
@@ -35,6 +35,20 @@ enum Role {
   VIEWER
 }
 
+/// Who may join a board without an invite.
+///
+/// PRIVATE is the DEFAULT, and that default is the whole point of Phase 3.
+/// Before this, every board behaved like LINK and there was no way to express
+/// anything else: `POST /rooms/:slug/join` always granted EDITOR, so a slug was
+/// effectively an edit credential. Defaulting to PRIVATE means a newly created
+/// board is closed until its owner opens it.
+enum RoomVisibility {
+  /// Members only. A link alone grants nothing; joining requires an invite.
+  PRIVATE
+  /// Anyone signed in who has the link may join. The old behaviour, now opt-in.
+  LINK
+}
+
 model User {
   id           String   @id @default(uuid()) @db.Uuid
   email        String   @unique
@@ -47,6 +61,7 @@ model User {
   memberships RoomMember[]
   elements    Element[]    @relation("ElementCreatedBy")
   wsTickets   WsTicket[]
+  invites     Invite[]     @relation("InviteCreatedBy")
 }
 
 /// Single-use, short-lived credential for opening a WebSocket.
@@ -72,17 +87,60 @@ model WsTicket {
 }
 
 model Room {
-  id        String   @id @default(uuid()) @db.Uuid
-  slug      String   @unique
-  name      String
-  ownerId   String   @db.Uuid
-  createdAt DateTime @default(now())
+  id         String         @id @default(uuid()) @db.Uuid
+  slug       String         @unique
+  name       String
+  ownerId    String         @db.Uuid
+  createdAt  DateTime       @default(now())
+  /// PRIVATE by default — see RoomVisibility. The migration also backfills every
+  /// existing row to PRIVATE, which was safe only because the database was empty
+  /// at the time; against live data the correct backfill would have been LINK,
+  /// to preserve share links people were already using.
+  visibility RoomVisibility @default(PRIVATE)
 
   owner    User         @relation("RoomOwner", fields: [ownerId], references: [id])
   members  RoomMember[]
   elements Element[]
+  invites  Invite[]
 
   @@index([ownerId])
+}
+
+/// A single-use (or bounded-use) credential granting membership of one room at
+/// one role.
+///
+/// Deliberately the SAME SHAPE AS WsTicket: a random value, only its SHA-256
+/// stored, the raw token returned once, and redemption done as one atomic
+/// statement. The row IS the invite. Reusing that pattern means one set of
+/// properties to reason about rather than two.
+///
+/// Unlike WsTicket, an invite is NOT consumed by deletion — it carries a use
+/// budget and an audit trail (who made it, when, whether it was revoked), so
+/// redemption increments `usedCount` instead. The atomicity requirement is
+/// identical: see redeemInvite() in apps/api/src/rooms/invites.ts.
+model Invite {
+  id        String    @id @default(uuid()) @db.Uuid
+  roomId    String    @db.Uuid
+  /// SHA-256 of the token, hex. The raw value is shown to the creator once and
+  /// never stored, so a database leak yields no usable invite.
+  tokenHash String    @unique
+  /// Role granted on redemption. The API refuses to mint OWNER invites.
+  role      Role      @default(EDITOR)
+  createdBy String    @db.Uuid
+  expiresAt DateTime
+  /// Use budget. 1 = single-use. Redemption is gated on usedCount < maxUses.
+  maxUses   Int       @default(1)
+  usedCount Int       @default(0)
+  /// Non-null once revoked. Kept rather than deleted so the audit trail
+  /// survives — "this link was revoked" is a different fact from "no such link".
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  room    Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  creator User @relation("InviteCreatedBy", fields: [createdBy], references: [id])
+
+  @@index([roomId])
+  @@index([expiresAt])
 }
 
 model RoomMember {

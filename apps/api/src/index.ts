@@ -7,7 +7,7 @@ import express, {
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import { authRouter } from "./auth/routes.js";
-import { roomRouter } from "./rooms/routes.js";
+import { inviteRouter, roomRouter } from "./rooms/routes.js";
 
 const app = express();
 
@@ -31,6 +31,9 @@ app.get("/health", (_req: Request, res: Response) => {
 
 app.use("/auth", authRouter);
 app.use("/rooms", roomRouter);
+// Mounted at the top level, not under /rooms: the caller is by definition not
+// yet a member of the room, so the token is the only authorization.
+app.use("/invites", inviteRouter);
 
 // Central error handler: log only the message (never request bodies/passwords)
 // and return a generic 500 so internals aren't leaked.
