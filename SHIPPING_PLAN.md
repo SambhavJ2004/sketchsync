@@ -87,8 +87,8 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
   Gate after these changes: typecheck, lint, build, unit tests all green;
   **e2e 27 passed in 3.5 minutes** against the local containerized Postgres.
 
-- **Phase 3 — in progress. Step 1 of 4 done: database and backend.** No client changes and
-  no socket eviction yet; those are later steps.
+- **Phase 3 — DONE.** Private boards and invites, in four steps: database and backend,
+  instant eviction, client UI, browser coverage.
 
   **Schema + migration `20260907120000_room_visibility_and_invites`:**
   - `RoomVisibility` enum (`PRIVATE` | `LINK`), `Room.visibility` defaulting to **PRIVATE**.
@@ -286,9 +286,50 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
   handles this case (clears the cookie, 401); ticket issuance does not. Surfaced by deleting
   test users while a browser tab still held their cookie.
 
-  **Still to do (3d):** e2e coverage for every access path — private-board 403, invite
-  redemption, revocation, member management and eviction all currently have **no browser
-  test**, and this step added a lot of UI that only manual verification has touched.
+  **Step 4 of 4 done: browser coverage. PHASE 3 IS COMPLETE.**
+
+  `apps/e2e/tests/08-access.spec.ts` — **13 new specs, suite 27 → 40**, run ~8.5 min.
+
+  - Stranger on a PRIVATE board: no-access screen, **no join affordance at all**, no canvas.
+    Stranger on a LINK board: join prompt still works and lands them in as EDITOR.
+  - EDITOR and VIEWER invites each grant their own role, and the VIEWER case asserts the
+    tools are genuinely disabled — the role has to reach the CANVAS, not just the membership
+    row.
+  - Expired, revoked, used-up and never-existed each render distinctly; a single-use link
+    redeemed by a second person is refused and says why.
+  - Revocation stops a **demonstrably live** multi-use link (someone redeems it successfully
+    first, so the test cannot pass against one that was merely used up).
+  - An invite link survives sign-in: no cookie → `/signin?next=…` → the return path still
+    holds the token → redeemed → in the board.
+  - A non-owner's share panel has the member list and owner badge but **zero** owner
+    controls — asserted as `toHaveCount(0)`, not "disabled".
+  - **Demotion on an open board** flips the toolbar with a `window` sentinel proving no
+    reload, and asserts the socket stays OPEN (a demotion is not a disconnect).
+  - **Removal** closes the socket, shows the overlay, reports `status() === "evicted"`, and
+    **ticket count is unchanged after 4 s** — the assertion that the terminal close code
+    stops the backoff loop fighting the eviction.
+  - Two boundary specs beyond the brief: a removed member cannot get back in by reloading
+    (eviction is best-effort; the `join` membership re-check is the real boundary), and the
+    rooms list drops the board.
+
+  **Verified the two critical specs have teeth**, the same way the atomic-redemption test
+  was: pointing `REALTIME_INTERNAL_URL` at a dead port made the API log
+  `evict notify failed (ignored)` and **both** the demotion and removal specs failed on the
+  assertion that matters. With eviction working they pass. They are not vacuous.
+
+  New fixtures in `seed.ts`, all over HTTP as the acting user because those routes are what
+  is under test: `createInvite`, `revokeInvite`, `acceptInvite`, `setMemberRole`,
+  `removeMember`, `inviteUrl`. The one exception is `expireInvite`, which writes the column
+  directly — expiry is judged by the database clock, so the alternatives were waiting out a
+  real TTL or faking the server's clock.
+
+  **Gate: green.** typecheck, lint, build, 205 unit tests, **e2e 40/40 in 8.5 min**.
+
+  **Phase 3 remaining gaps, deliberately not closed:** no test drives two *browsers* racing
+  one single-use invite (that race is covered by the DB-backed unit test, where it can be
+  made truly concurrent); the share panel's copy-to-clipboard is not asserted (clipboard
+  permissions in headless Chromium); and `POST /auth/ws-ticket` still 500s for a valid token
+  belonging to a deleted user, noted in step 3.
 
 - **Phase 5 — in progress.** `README.md` written at the repo root: description, live link,
   stack + CI badge, the architecture diagram reused from `ARCHITECTURE.md`, a three-part
@@ -311,15 +352,23 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
 barely touches application logic. Phase 3 rewrites the authorization model, and is deferred
 until the codebase has been studied properly rather than rushed alongside a deploy.
 
-**The consequence, accepted knowingly — and now live, not hypothetical:** until Phase 3
-lands, boards are link-access. `POST /rooms/:slug/join` always grants EDITOR and every 403
-renders as "Join this board?", so **anyone who has a board URL can edit that board**. There
-is now a real deployed URL for which that is true.
+**The consequence while that gap was open:** boards were link-access.
+`POST /rooms/:slug/join` always granted EDITOR and every 403 rendered as "Join this board?",
+so anyone holding a board URL could edit it — and for a while there was a real deployed URL
+for which that was true. The repo stayed private and the link was shared selectively.
 
-Therefore **the repo stays private and the deployed URL is shared selectively** until Phase 3
-is done. Do not publicise the deployed link — in a README, on a resume, or anywhere public —
-before then. That is the first thing Phase 5 will want to do, so Phase 3 gates Phase 5 in
-practice even though nothing in the code enforces the order.
+**RESOLVED — Phase 3 has now landed.** Boards default to PRIVATE, joining a private board is
+refused, and access is granted only by an invite carrying an explicit role. **The constraint
+that blocked Phase 5 is therefore lifted:** the deployed link can be publicised, and the repo
+can go public whenever you want (which is also what makes the README's CI badge render).
+
+Two things to do deliberately rather than by assumption before publicising:
+- **Existing deployed boards were created before this change.** The migration backfilled
+  every row to PRIVATE, but that ran against a wiped database; check what the live Neon
+  database actually holds, and set each board's visibility on purpose.
+- **A LINK board is still exactly as open as it always was** — that is the point of the
+  setting, not a leftover. Anything shared as a demo should be one you are happy for a
+  stranger to edit.
 
 ---
 

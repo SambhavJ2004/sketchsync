@@ -137,6 +137,107 @@ export async function addMember(
   });
 }
 
+// ── Invites and membership ─────────────────────────────────────────────────
+// Everything here goes over HTTP as the acting user, because these routes ARE
+// what the access-path specs are testing. The one exception is expireInvite(),
+// which reaches for the database because there is no way to make time pass.
+
+export interface SeededInvite {
+  id: string;
+  token: string;
+  acceptUrl: string;
+  role: "EDITOR" | "VIEWER";
+}
+
+/** Mint an invite as `owner`. The response is the only time the token exists. */
+export async function createInvite(
+  owner: SeededUser,
+  slug: string,
+  opts: { role?: "EDITOR" | "VIEWER"; expiresInHours?: number; maxUses?: number } = {},
+): Promise<SeededInvite> {
+  const res = await fetch(`${WEB_ORIGIN}/api/rooms/${slug}/invites`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: owner.cookieValue },
+    body: JSON.stringify({
+      role: opts.role ?? "EDITOR",
+      expiresInHours: opts.expiresInHours ?? 24,
+      maxUses: opts.maxUses ?? 1,
+    }),
+  });
+  if (!res.ok) throw new Error(`create invite failed: ${res.status}`);
+  return (await res.json()) as SeededInvite;
+}
+
+export async function revokeInvite(
+  owner: SeededUser,
+  slug: string,
+  inviteId: string,
+): Promise<void> {
+  const res = await fetch(`${WEB_ORIGIN}/api/rooms/${slug}/invites/${inviteId}`, {
+    method: "DELETE",
+    headers: { cookie: owner.cookieValue },
+  });
+  if (!res.ok) throw new Error(`revoke invite failed: ${res.status}`);
+}
+
+/**
+ * Backdate an invite's expiry, straight to the database.
+ *
+ * The only fixture here that bypasses HTTP, and unavoidably so: expiry is
+ * evaluated by the DATABASE clock (`expiresAt > NOW()`), so the alternatives are
+ * waiting out a real TTL or faking the server's clock. Rewriting the column
+ * produces exactly the row an expired invite has.
+ */
+export async function expireInvite(inviteId: string): Promise<void> {
+  await prismaClient.invite.update({
+    where: { id: inviteId },
+    data: { expiresAt: new Date(Date.now() - 60_000) },
+  });
+}
+
+/** Redeem an invite as `user`, over HTTP. Returns the status so a caller can
+ *  assert a refusal without the fixture deciding what counts as failure. */
+export async function acceptInvite(
+  user: SeededUser,
+  token: string,
+): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`${WEB_ORIGIN}/api/invites/${token}/accept`, {
+    method: "POST",
+    headers: { cookie: user.cookieValue },
+  });
+  return { status: res.status, body: await res.json().catch(() => null) };
+}
+
+/** Change a member's role as the owner — the action the eviction path reacts to. */
+export async function setMemberRole(
+  owner: SeededUser,
+  slug: string,
+  userId: string,
+  role: "EDITOR" | "VIEWER",
+): Promise<void> {
+  const res = await fetch(`${WEB_ORIGIN}/api/rooms/${slug}/members/${userId}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json", cookie: owner.cookieValue },
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) throw new Error(`set member role failed: ${res.status}`);
+}
+
+/** Remove a member as the owner. Triggers the api -> realtime eviction call. */
+export async function removeMember(
+  owner: SeededUser,
+  slug: string,
+  userId: string,
+): Promise<void> {
+  const res = await fetch(`${WEB_ORIGIN}/api/rooms/${slug}/members/${userId}`, {
+    method: "DELETE",
+    headers: { cookie: owner.cookieValue },
+  });
+  if (!res.ok) throw new Error(`remove member failed: ${res.status}`);
+}
+
+export const inviteUrl = (token: string): string => `${WEB_ORIGIN}/invite/${token}`;
+
 export type SeedShape =
   | { kind: "rect"; x: number; y: number; w?: number; h?: number; stroke?: string }
   | { kind: "pencil"; points: number };
