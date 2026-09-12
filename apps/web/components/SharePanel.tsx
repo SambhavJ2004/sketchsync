@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
   Copy,
+  Eye,
   Globe,
   Lock,
+  Pencil,
   Trash2,
   UserMinus,
   Users,
@@ -70,6 +72,7 @@ export function SharePanel({ slug, role }: { slug: string; role: Role }) {
   const [members, setMembers] = useState<MemberView[] | null>(null);
   const [invites, setInvites] = useState<InviteView[] | null>(null);
   const [visibility, setVisibility] = useState<Visibility | null>(null);
+  const [linkRole, setLinkRole] = useState<GrantableRole>("EDITOR");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -91,6 +94,7 @@ export function SharePanel({ slug, role }: { slug: string; role: Role }) {
       ]);
       setMembers(m);
       setVisibility(room.visibility);
+      setLinkRole(room.linkRole);
       // Invites are owner-only; asking as a non-owner would be a guaranteed 403.
       if (isOwner) setInvites(await api.listInvites(slug));
     } catch (err) {
@@ -140,6 +144,29 @@ export function SharePanel({ slug, role }: { slug: string; role: Role }) {
       triggerRef.current?.focus();
     }
   }, [open]);
+
+  /**
+   * The role a link join grants. Separate from visibility so flipping a board
+   * to private and back does not silently forget that it was share-to-view.
+   */
+  async function setBoardLinkRole(next: GrantableRole): Promise<void> {
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await api.updateRoom(slug, { linkRole: next });
+      setLinkRole(updated.linkRole);
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.status === 403
+            ? "Only the board owner can change this."
+            : err.message
+          : "Couldn't change what the link grants.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function setBoardVisibility(next: Visibility): Promise<void> {
     setBusy(true);
@@ -287,11 +314,40 @@ export function SharePanel({ slug, role }: { slug: string; role: Role }) {
                   testId="visibility-link"
                 />
               </div>
-              <p className="text-xs text-slate-500">
-                {visibility === "LINK"
-                  ? "Anyone signed in who has the board link can join and edit."
-                  : "Only people you invite can open this board."}
-              </p>
+              {/* The can-edit / can-view choice only exists while the link is
+                  live — showing it on a private board would describe a rule
+                  nothing is currently applying. */}
+              {visibility === "LINK" ? (
+                <>
+                  <div className="flex gap-1 rounded-lg bg-slate-100 p-1">
+                    <VisibilityButton
+                      active={linkRole === "EDITOR"}
+                      disabled={busy}
+                      onClick={() => void setBoardLinkRole("EDITOR")}
+                      icon={<Pencil className="h-3.5 w-3.5" strokeWidth={2} />}
+                      label="Can edit"
+                      testId="link-role-editor"
+                    />
+                    <VisibilityButton
+                      active={linkRole === "VIEWER"}
+                      disabled={busy}
+                      onClick={() => void setBoardLinkRole("VIEWER")}
+                      icon={<Eye className="h-3.5 w-3.5" strokeWidth={2} />}
+                      label="Can view"
+                      testId="link-role-viewer"
+                    />
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    {linkRole === "EDITOR"
+                      ? "Anyone signed in who has the board link can join and edit."
+                      : "Anyone signed in who has the board link can join, but only to view."}
+                  </p>
+                </>
+              ) : (
+                <p className="text-xs text-slate-500">
+                  Only people you invite can open this board.
+                </p>
+              )}
             </section>
           )}
 

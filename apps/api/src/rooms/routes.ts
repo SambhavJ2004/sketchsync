@@ -32,6 +32,7 @@ function membershipView(room: Room, role: Role) {
     name: room.name,
     ownerId: room.ownerId,
     visibility: room.visibility,
+    linkRole: room.linkRole,
     role,
   };
 }
@@ -73,7 +74,14 @@ roomRouter.get("/", async (req, res) => {
     select: {
       role: true,
       room: {
-        select: { id: true, slug: true, name: true, ownerId: true, visibility: true },
+        select: {
+          id: true,
+          slug: true,
+          name: true,
+          ownerId: true,
+          visibility: true,
+          linkRole: true,
+        },
       },
     },
     orderBy: { room: { createdAt: "desc" } },
@@ -86,6 +94,7 @@ roomRouter.get("/", async (req, res) => {
       name: m.room.name,
       ownerId: m.room.ownerId,
       visibility: m.room.visibility,
+      linkRole: m.room.linkRole,
       role: m.role,
     })),
   );
@@ -128,10 +137,18 @@ roomRouter.post("/:slug/join", async (req, res) => {
 
   // Upsert makes this idempotent and race-safe: existing members keep their
   // current role; new members are added as EDITOR. Either way -> 200.
+  // Grants the board's OWN linkRole, not a hardcoded EDITOR. Before this column
+  // existed, "anyone with the link" always meant "anyone with the link can
+  // EDIT" — there was no way to share a board read-only, and a VIEWER invite on
+  // a LINK board was close to meaningless because the recipient could ignore it,
+  // open the board URL and click Join to get EDITOR anyway.
+  //
+  // `update: {}` keeps never-demote true here too: an existing EDITOR who
+  // re-joins a board whose link has since been set to view-only keeps EDITOR.
   const membership = await prismaClient.roomMember.upsert({
     where: { roomId_userId: { roomId: room.id, userId } },
     update: {},
-    create: { roomId: room.id, userId, role: Role.EDITOR },
+    create: { roomId: room.id, userId, role: room.linkRole },
     select: { role: true },
   });
 
@@ -170,6 +187,9 @@ roomRouter.patch("/:slug", requireMembership(Role.OWNER), async (req, res) => {
       ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
       ...(parsed.data.visibility !== undefined
         ? { visibility: parsed.data.visibility }
+        : {}),
+      ...(parsed.data.linkRole !== undefined
+        ? { linkRole: parsed.data.linkRole }
         : {}),
     },
   });
@@ -481,11 +501,20 @@ inviteRouter.post("/:token/accept", async (req, res) => {
 
   const room = await prismaClient.room.findUnique({ where: { id: result.roomId } });
   if (!room) {
-    // The room was deleted between redemption and this read. The use is spent;
-    // that is the safe direction (see acceptInvite).
+    // The room was deleted between redemption and this read. Any use spent is
+    // gone; that is the safe direction (see acceptInvite).
     res.status(404).json({ message: "That board no longer exists." });
     return;
   }
 
-  res.status(200).json(membershipView(room, result.role));
+  // `outcome` lets the client say what actually happened. Without it,
+  // "you already had access, nothing changed" is indistinguishable from
+  // "you just joined" — which is exactly how a VIEWER invite that silently did
+  // nothing went unnoticed.
+  res.status(200).json({
+    ...membershipView(room, result.role),
+    outcome: result.kind,
+    previousRole: result.previousRole ?? null,
+    usedAUse: result.usedAUse,
+  });
 });

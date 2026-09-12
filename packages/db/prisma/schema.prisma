@@ -98,6 +98,17 @@ model Room {
   /// to preserve share links people were already using.
   visibility RoomVisibility @default(PRIVATE)
 
+  /// Role granted by `POST /rooms/:slug/join` when visibility is LINK.
+  ///
+  /// Meaningless while visibility is PRIVATE (nothing can join by link), but
+  /// stored regardless so flipping to LINK and back does not lose the choice.
+  ///
+  /// Typed as the full `Role` because Prisma has one enum, but the API refuses
+  /// OWNER — a link must never mint a second owner. EDITOR is the default
+  /// because it is what the route hardcoded before this column existed, so an
+  /// existing LINK board behaves exactly as it did.
+  linkRole Role @default(EDITOR)
+
   owner    User         @relation("RoomOwner", fields: [ownerId], references: [id])
   members  RoomMember[]
   elements Element[]

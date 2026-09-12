@@ -4,7 +4,8 @@ import { use, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Lock } from "lucide-react";
-import { api, ApiError } from "@/lib/api/client";
+import { api, ApiError, type Role } from "@/lib/api/client";
+import { useToast } from "@/components/Toast";
 import { useAuth } from "@/lib/auth/AuthProvider";
 import { Button, FullScreen, Spinner } from "@/components/ui";
 
@@ -24,6 +25,22 @@ import { Button, FullScreen, Spinner } from "@/components/ui";
  *   403 -> shouldn't happen   -> generic, with a retry
  */
 
+const ROLE_LABEL: Record<Role, string> = {
+  OWNER: "the owner",
+  EDITOR: "an Editor",
+  VIEWER: "a Viewer",
+};
+
+/** "You're already an Editor" / "...the owner" — reads as a sentence. */
+function article(role: Role): string {
+  return ROLE_LABEL[role];
+}
+
+/** Bare role name, for "changed from Viewer to Editor". */
+function label(role: Role): string {
+  return role === "OWNER" ? "Owner" : role === "EDITOR" ? "Editor" : "Viewer";
+}
+
 type State =
   | { kind: "working" }
   | { kind: "failed"; title: string; detail: string; canRetry: boolean };
@@ -36,6 +53,7 @@ export default function InvitePage({
   const { token } = use(params);
   const router = useRouter();
   const { user, loading } = useAuth();
+  const { show } = useToast();
   const [state, setState] = useState<State>({ kind: "working" });
 
   /**
@@ -49,6 +67,27 @@ export default function InvitePage({
     setState({ kind: "working" });
     try {
       const room = await api.acceptInvite(token);
+
+      // SAY WHAT ACTUALLY HAPPENED. An invite that changed nothing used to be
+      // indistinguishable from one that granted access: same redirect, same
+      // board, no signal. A view-only link redeemed by an existing editor is the
+      // case that actually bit — it silently granted nothing.
+      //
+      // The toast is raised BEFORE navigating: ToastProvider lives in the root
+      // layout, so it survives a client-side route change and the message is
+      // read on the board rather than on a page that is about to disappear.
+      if (room.outcome === "alreadyMember") {
+        show(`You're already ${article(room.role)} on this board.`, {
+          tone: "info",
+          key: "invite-outcome",
+        });
+      } else if (room.outcome === "upgraded" && room.previousRole) {
+        show(
+          `Your access changed from ${label(room.previousRole)} to ${label(room.role)}.`,
+          { tone: "info", key: "invite-outcome" },
+        );
+      }
+
       // replace(), not push(): the invite URL is spent, so leaving it in history
       // means Back re-runs a redemption that can only fail.
       router.replace(`/room/${room.slug}`);
@@ -87,7 +126,7 @@ export default function InvitePage({
         });
       }
     }
-  }, [token, router]);
+  }, [token, router, show]);
 
   useEffect(() => {
     // Wait for AuthProvider to settle: acting while `loading` would send a

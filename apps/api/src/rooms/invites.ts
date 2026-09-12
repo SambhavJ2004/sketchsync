@@ -72,7 +72,78 @@ export interface RedeemSuccess {
 }
 
 /**
- * Redeem an invite: validate and CONSUME one use in a single statement.
+ * What redeeming an invite actually did.
+ *
+ * `alreadyMember` is the outcome that matters, and it exists because of a real
+ * bug. Redeeming a VIEWER invite as an existing EDITOR used to report success,
+ * redirect into the board, SPEND A USE, and grant exactly what the user already
+ * had — silently. An owner handing out a view-only link had no way to discover
+ * it had not applied. Now that case is named, costs nothing, and is reported.
+ */
+export type AcceptKind = "joined" | "upgraded" | "alreadyMember";
+
+export interface AcceptSuccess {
+  ok: true;
+  kind: AcceptKind;
+  roomId: string;
+  /** The role the user holds AFTER this call. */
+  role: Role;
+  /** Their previous role, when they already had one. */
+  previousRole?: Role;
+  /** Whether a use was consumed. Always false for `alreadyMember`. */
+  usedAUse: boolean;
+}
+
+const ROLE_ORDER: Record<Role, number> = { OWNER: 3, EDITOR: 2, VIEWER: 1 };
+
+function rankOf(role: Role): number {
+  return ROLE_ORDER[role];
+}
+
+/** Higher of two roles by privilege. Local to avoid importing ROLE_RANK's
+ *  ordering concerns into this module's error paths. */
+function higherRole(a: Role, b: Role): Role {
+  return rankOf(a) >= rankOf(b) ? a : b;
+}
+
+/**
+ * Validate an invite WITHOUT consuming it.
+ *
+ * Split out because "does this redemption need to spend a use?" has to be
+ * decided before the atomic increment, and that decision depends on the
+ * invite's room and role.
+ *
+ * THIS READ IS NOT THE VALIDITY GATE. The increment below re-checks every
+ * condition against the committed row, so a concurrent revoke, expiry or
+ * exhaustion landing between the two still refuses correctly.
+ */
+async function inspectInvite(
+  tokenHash: string,
+): Promise<
+  | { ok: true; id: string; roomId: string; role: Role }
+  | { ok: false; reason: RedeemFailure }
+> {
+  const invite = await prismaClient.invite.findUnique({
+    where: { tokenHash },
+    select: {
+      id: true,
+      roomId: true,
+      role: true,
+      revokedAt: true,
+      expiresAt: true,
+      usedCount: true,
+      maxUses: true,
+    },
+  });
+  if (!invite) return { ok: false, reason: "not_found" };
+  if (invite.revokedAt !== null) return { ok: false, reason: "revoked" };
+  if (invite.expiresAt.getTime() <= Date.now()) return { ok: false, reason: "expired" };
+  if (invite.usedCount >= invite.maxUses) return { ok: false, reason: "exhausted" };
+  return { ok: true, id: invite.id, roomId: invite.roomId, role: invite.role };
+}
+
+/**
+ * Consume one use: validate and increment in a single statement.
  *
  * ```sql
  * UPDATE "Invite" SET "usedCount" = "usedCount" + 1
@@ -90,11 +161,6 @@ export interface RedeemSuccess {
  *
  * `NOW()` is the DATABASE clock, so a skewed application server cannot extend an
  * invite's life, exactly as with WsTicket expiry.
- *
- * On failure this does a second, read-only query purely to explain WHY, since
- * the UPDATE cannot distinguish "no such token" from "already used up". That
- * read is not security-sensitive: it runs only after the atomic gate has already
- * refused, and it reports on a token the caller already holds.
  */
 export async function redeemInvite(
   rawToken: string,
@@ -118,57 +184,90 @@ export async function redeemInvite(
     return { ok: true, value: { inviteId: row.id, roomId: row.roomId, role: row.role } };
   }
 
-  return { ok: false, reason: await explainFailure(tokenHash) };
+  // The UPDATE cannot distinguish "no such token" from "already used up", so
+  // diagnose with a read. Not security-sensitive: it runs only after the atomic
+  // gate has already refused, and reports on a token the caller already holds.
+  const diagnosis = await inspectInvite(tokenHash);
+  if (!diagnosis.ok) return { ok: false, reason: diagnosis.reason };
+  // Refused by the gate, yet every condition now reads as satisfiable — the row
+  // changed between the two queries. Something else consumed it.
+  return { ok: false, reason: "exhausted" };
 }
 
 /**
- * Diagnose a refused redemption. Ordered most-specific-first so the message
- * names the reason a user can act on ("this link expired" beats "invalid link").
- */
-async function explainFailure(tokenHash: string): Promise<RedeemFailure> {
-  const invite = await prismaClient.invite.findUnique({
-    where: { tokenHash },
-    select: { revokedAt: true, expiresAt: true, usedCount: true, maxUses: true },
-  });
-  if (!invite) return "not_found";
-  if (invite.revokedAt !== null) return "revoked";
-  if (invite.expiresAt.getTime() <= Date.now()) return "expired";
-  if (invite.usedCount >= invite.maxUses) return "exhausted";
-  // Refused by the atomic gate but every condition now reads as satisfiable —
-  // only possible if the row changed between the two queries. Treat as
-  // exhausted: something else consumed it.
-  return "exhausted";
-}
-
-/**
- * Accept an invite for a user: redeem it, then create or upgrade the membership.
+ * Accept an invite: work out what it would actually change, then do the least
+ * that achieves it.
  *
- * Redemption happens FIRST and outside the membership write. If the membership
- * upsert were to fail, a use is still spent — which is the safe direction: a
- * wasted use is recoverable by issuing another invite, whereas granting
- * membership without consuming a use would make every invite unbounded.
+ *   - Not a member          -> join at the invite's role.       (spends a use)
+ *   - Member at a LOWER role -> upgrade to the invite's role.   (spends a use)
+ *   - Member at the SAME or HIGHER role, board owner included
+ *                           -> NOTHING. No use spent, no role change, reported
+ *                              to the caller as `alreadyMember`.
  *
- * An existing member keeps the HIGHER of their current role and the invite's, so
- * redeeming a VIEWER link can never silently demote an EDITOR.
+ * WHY NOT SPENDING A USE MATTERS. A single-use link handed to someone who
+ * already has access would otherwise be burnt on a no-op, and the next person it
+ * was meant for would be told it had "already been used". Charging a use for a
+ * change that did not happen is indefensible once the no-op is detectable at all.
+ *
+ * NEVER-DEMOTE IS KEPT. A VIEWER link cannot strip an EDITOR's access — that
+ * would turn a link into a weapon, and anyone holding one could downgrade a
+ * colleague. Demotion stays the owner's explicit act through the member list,
+ * where it is deliberate and attributable.
+ *
+ * THE BOARD OWNER IS NEVER TOUCHED. OWNER outranks both invite roles, so the
+ * same-or-higher branch already covers it — but it is also checked explicitly,
+ * because "the owner's role cannot be changed by a link" is too important to
+ * rest on a rank comparison some later edit might reorder.
  */
 export async function acceptInvite(
   rawToken: string,
   userId: string,
-): Promise<
-  | { ok: true; roomId: string; role: Role }
-  | { ok: false; reason: RedeemFailure }
-> {
+): Promise<AcceptSuccess | { ok: false; reason: RedeemFailure }> {
+  const tokenHash = hashInviteToken(rawToken);
+
+  // Look before consuming. The increment below remains the real gate; this read
+  // exists only to decide whether consuming is warranted at all.
+  const inspected = await inspectInvite(tokenHash);
+  if (!inspected.ok) return { ok: false, reason: inspected.reason };
+
+  const existing = await prismaClient.roomMember.findUnique({
+    where: { roomId_userId: { roomId: inspected.roomId, userId } },
+    select: { role: true },
+  });
+
+  if (existing) {
+    const room = await prismaClient.room.findUnique({
+      where: { id: inspected.roomId },
+      select: { ownerId: true },
+    });
+    const isOwner = room?.ownerId === userId;
+
+    if (isOwner || rankOf(existing.role) >= rankOf(inspected.role)) {
+      return {
+        ok: true,
+        kind: "alreadyMember",
+        roomId: inspected.roomId,
+        role: existing.role,
+        previousRole: existing.role,
+        usedAUse: false,
+      };
+    }
+  }
+
+  // A real change. Only now is a use spent, under the atomic gate.
   const redeemed = await redeemInvite(rawToken);
   if (!redeemed.ok) return redeemed;
 
   const { roomId, role } = redeemed.value;
 
-  const existing = await prismaClient.roomMember.findUnique({
+  // Re-read after the increment: another request may have changed this
+  // membership in between. `higherRole` keeps never-demote true even in that
+  // race, so a concurrent upgrade cannot be undone by a lower-role redemption.
+  const current = await prismaClient.roomMember.findUnique({
     where: { roomId_userId: { roomId, userId } },
     select: { role: true },
   });
-
-  const effective = existing ? higherRole(existing.role, role) : role;
+  const effective = current ? higherRole(current.role, role) : role;
 
   await prismaClient.roomMember.upsert({
     where: { roomId_userId: { roomId, userId } },
@@ -176,14 +275,16 @@ export async function acceptInvite(
     create: { roomId, userId, role: effective },
   });
 
-  return { ok: true, roomId, role: effective };
-}
-
-/** Higher of two roles by privilege. Local to avoid importing ROLE_RANK's
- *  ordering concerns into this module's error paths. */
-function higherRole(a: Role, b: Role): Role {
-  const rank: Record<Role, number> = { OWNER: 3, EDITOR: 2, VIEWER: 1 };
-  return rank[a] >= rank[b] ? a : b;
+  return current
+    ? {
+        ok: true,
+        kind: "upgraded",
+        roomId,
+        role: effective,
+        previousRole: current.role,
+        usedAUse: true,
+      }
+    : { ok: true, kind: "joined", roomId, role: effective, usedAUse: true };
 }
 
 /** Public, non-sensitive view of an invite. NEVER includes the token or hash. */

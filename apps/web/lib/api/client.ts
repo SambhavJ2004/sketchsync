@@ -45,7 +45,19 @@ export interface RoomSummary {
   name: string;
   ownerId: string;
   visibility: Visibility;
+  /** Role granted by joining via link, when visibility is LINK. */
+  linkRole: GrantableRole;
   role: Role;
+}
+
+/** What `POST /invites/:token/accept` actually did. `alreadyMember` means the
+ *  invite changed nothing and deliberately spent no use. */
+export type AcceptOutcome = "joined" | "upgraded" | "alreadyMember";
+
+export interface AcceptedInvite extends RoomSummary {
+  outcome: AcceptOutcome;
+  previousRole: Role | null;
+  usedAUse: boolean;
 }
 
 /** One member of a board (GET /rooms/:slug/members). */
@@ -215,7 +227,10 @@ export const api = {
     });
   },
   /** Rename and/or change visibility. OWNER only; the API enforces it. */
-  updateRoom(slug: string, patch: { name?: string; visibility?: Visibility }) {
+  updateRoom(
+    slug: string,
+    patch: { name?: string; visibility?: Visibility; linkRole?: GrantableRole },
+  ) {
     return request<RoomSummary>(`/rooms/${encodeURIComponent(slug)}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
@@ -262,7 +277,7 @@ export const api = {
   /** Redeem an invite. 401 = not signed in, 404 = unknown, 410 = expired /
    *  revoked / used up (the message says which). */
   acceptInvite(token: string) {
-    return request<RoomSummary>(`/invites/${encodeURIComponent(token)}/accept`, {
+    return request<AcceptedInvite>(`/invites/${encodeURIComponent(token)}/accept`, {
       method: "POST",
     });
   },

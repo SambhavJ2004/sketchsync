@@ -87,8 +87,61 @@ so. Prose elsewhere drifts; this list is what a new session is told to trust.
   Gate after these changes: typecheck, lint, build, unit tests all green;
   **e2e 27 passed in 3.5 minutes** against the local containerized Postgres.
 
-- **Phase 3 — DONE.** Private boards and invites, in four steps: database and backend,
-  instant eviction, client UI, browser coverage.
+- **Phase 3 — DONE**, plus a post-release fix (3e) for two real bugs found in production.
+  Five steps: database and backend, instant eviction, client UI, browser coverage, and the
+  redemption/linkRole fix below.
+
+  ### 3e — reported: "a VIEWER invite still lets the account draw"
+
+  **Diagnosed before changing anything.** A throwaway Playwright spec reproduced the flow at
+  every layer — database row, `GET /members`, client belief, gateway acceptance. Findings:
+  - A **brand-new** account redeeming a VIEWER invite was entirely correct: VIEWER stored,
+    VIEWER served, read-only badge, tools disabled, nothing drawn, nothing persisted.
+  - An account **already a member** kept its existing role. `acceptInvite` applied a
+    never-demote rule, so a VIEWER invite redeemed by an existing EDITOR **reported success,
+    redirected into the board, SPENT A USE, and granted nothing** — silently. Reproduced via
+    both a prior link join and a prior EDITOR invite, so the trigger was "already a member",
+    not "joined by link".
+  - Gateway enforcement was never at fault: a raw socket write as a true VIEWER was refused
+    with `You do not have permission to edit` and persisted nothing.
+  - **Second, compounding bug:** `POST /rooms/:slug/join` hardcoded EDITOR, so on a LINK
+    board a VIEWER invite was close to meaningless — the recipient could ignore it, open the
+    board URL and click Join for edit rights.
+
+  **Why the suite passed.** `07-states` grants VIEWER by direct row write and tests
+  enforcement; `08-access` tests the invite path — but **all 18 redemptions in it use a
+  freshly-created user**. Neither file was wrong; the gap was their intersection. No spec had
+  ever redeemed an invite as an existing member.
+
+  **Fix (option 2 — refuse and report):**
+  - Same or higher existing role, board owner included → **no use spent**, no role change,
+    reported as `alreadyMember`; the client raises a toast ("You're already an Editor on this
+    board") and still lands them in the board. Not spending the use is the half that matters:
+    a single-use link burnt on a no-op would tell the next person it was "already used".
+  - Lower existing role → upgrade, use spent, reported as `upgraded`.
+  - **Never-demote is kept** — a VIEWER link cannot strip an EDITOR, or anyone holding one
+    could downgrade a colleague. Demotion stays the owner's explicit act via the member list.
+  - The atomic single-use gate is unchanged. A new non-consuming `inspectInvite` read decides
+    *whether* to consume; the `UPDATE ... RETURNING` remains the real validity gate, so a
+    concurrent revoke/expiry/exhaustion between the two still refuses.
+  - **`Room.linkRole`** (migration `20260911120000`, `Role`, default **EDITOR** — the
+    no-change default, so existing LINK boards behave exactly as before). `join` grants it
+    instead of a hardcoded EDITOR; `PATCH /rooms/:slug` accepts it; the share panel shows a
+    **Can edit / Can view** choice under "Anyone with the link", owner only, visible only
+    while the link is actually live.
+
+  **Coverage for the gap itself:** `09-invite-existing-member.spec.ts`, **8 specs, suite
+  40 → 48.** Redemption as an existing member at a higher, equal and lower role; the owner
+  redeeming their own view-only link; that the unspent invite still works for its intended
+  recipient; a `linkRole: VIEWER` board granting VIEWER on join; the EDITOR default
+  unchanged; and the owner switching what the link grants, asserted through a second joiner
+  rather than local state. The temporary repro spec was deleted once these covered it.
+
+  **Gate: green.** typecheck, lint, build, 205 unit tests, **e2e 48/48 in 6.9 min.**
+
+  **Not done, and worth deciding:** the live Neon database still holds whatever roles and
+  visibilities production accumulated before this fix — including any board whose `linkRole`
+  is now EDITOR by migration default. Check those before sharing the link again.
 
   **Schema + migration `20260907120000_room_visibility_and_invites`:**
   - `RoomVisibility` enum (`PRIVATE` | `LINK`), `Room.visibility` defaulting to **PRIVATE**.

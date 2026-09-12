@@ -47,6 +47,9 @@ export async function createUser(label = "user"): Promise<SeededUser> {
 }
 
 export interface CreateRoomOptions {
+  /** Role a link join grants, when visibility is LINK. Defaults to EDITOR,
+   *  matching the column default and the pre-linkRole behaviour. */
+  linkRole?: "EDITOR" | "VIEWER";
   /**
    * Defaults to PRIVATE, matching production: `POST /rooms` has no visibility
    * field and the column defaults to PRIVATE.
@@ -78,14 +81,17 @@ export async function createRoom(
   // Opening a board up is a separate, deliberate act — visibility is not
   // settable at creation. Done over the real owner-only PATCH rather than by
   // writing the column, so the fixture reaches LINK the same way a user would.
-  if (opts.visibility === "LINK") {
+  if (opts.visibility === "LINK" || opts.linkRole) {
+    const body: Record<string, string> = {};
+    if (opts.visibility === "LINK") body.visibility = "LINK";
+    if (opts.linkRole) body.linkRole = opts.linkRole;
     const patch = await fetch(`${WEB_ORIGIN}/api/rooms/${room.slug}`, {
       method: "PATCH",
       headers: { "content-type": "application/json", cookie: user.cookieValue },
-      body: JSON.stringify({ visibility: "LINK" }),
+      body: JSON.stringify(body),
     });
     if (!patch.ok) {
-      throw new Error(`set visibility=LINK failed: ${patch.status}`);
+      throw new Error(`set link options failed: ${patch.status}`);
     }
   }
 
@@ -237,6 +243,29 @@ export async function removeMember(
 }
 
 export const inviteUrl = (token: string): string => `${WEB_ORIGIN}/invite/${token}`;
+
+/** The role actually stored for a member. Read from the database so a test
+ *  asserts what was RECORDED, not what a response said. */
+export async function memberRole(
+  roomId: string,
+  userId: string,
+): Promise<string | null> {
+  const row = await prismaClient.roomMember.findUnique({
+    where: { roomId_userId: { roomId, userId } },
+    select: { role: true },
+  });
+  return row?.role ?? null;
+}
+
+/** How many uses an invite has consumed — the other half of "did redemption
+ *  actually do anything?". */
+export async function inviteUsedCount(inviteId: string): Promise<number> {
+  const row = await prismaClient.invite.findUnique({
+    where: { id: inviteId },
+    select: { usedCount: true },
+  });
+  return row?.usedCount ?? -1;
+}
 
 export type SeedShape =
   | { kind: "rect"; x: number; y: number; w?: number; h?: number; stroke?: string }

@@ -107,10 +107,20 @@ export const UpdateRoomInput = z
   .object({
     name: RoomName.optional(),
     visibility: RoomVisibility.optional(),
+    /**
+     * Role granted to anyone joining by link, when visibility is LINK.
+     *
+     * `InviteRole`, so OWNER is unreachable — a share link must never mint a
+     * second owner, for the same reason an invite cannot.
+     */
+    linkRole: InviteRole.optional(),
   })
   .refine(
-    (body) => body.name !== undefined || body.visibility !== undefined,
-    { message: "Provide at least one of: name, visibility" },
+    (body) =>
+      body.name !== undefined ||
+      body.visibility !== undefined ||
+      body.linkRole !== undefined,
+    { message: "Provide at least one of: name, visibility, linkRole" },
   );
 export type UpdateRoomInput = z.infer<typeof UpdateRoomInput>;
 
